@@ -16,10 +16,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let request: OracleRequest = serde_json::from_str(&input_string)?;
 
     // Validate: check max tokens limit
-    if request.tokens.len() > MAX_TOKENS_PER_REQUEST {
+    if request.requests.len() > MAX_TOKENS_PER_REQUEST {
         let error = format!(
             "Too many tokens requested: {} (max: {})",
-            request.tokens.len(),
+            request.requests.len(),
             MAX_TOKENS_PER_REQUEST
         );
         print!("{}", error);
@@ -32,24 +32,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let coinmarketcap_key = env::var("COINMARKETCAP_API_KEY").ok();
     let twelvedata_key = env::var("TWELVEDATA_API_KEY").ok();
 
-    let mut token_responses = Vec::new();
+    let mut data_responses = Vec::new();
 
     // Process each token sequentially
-    for token_req in request.tokens {
-        let response = process_token_request(
-            &token_req,
+    for data_req in request.requests {
+        let response = process_data_request(
+            &data_req,
             request.max_price_deviation_percent,
             coingecko_key.as_deref(),
             coinmarketcap_key.as_deref(),
             twelvedata_key.as_deref(),
         );
 
-        token_responses.push(response);
+        data_responses.push(response);
     }
 
     // Build response
     let oracle_response = OracleResponse {
-        tokens: token_responses,
+        results: data_responses,
     };
 
     // Output JSON response to stdout
@@ -61,23 +61,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Process single token request
-fn process_token_request(
-    token_req: &TokenRequest,
+fn process_data_request(
+    data_req: &DataRequest,
     max_deviation: f64,
     coingecko_key: Option<&str>,
     coinmarketcap_key: Option<&str>,
     twelvedata_key: Option<&str>,
-) -> TokenResponse {
+) -> DataResponse {
     let mut source_prices: Vec<SourcePrice> = Vec::new();
     let mut errors: Vec<String> = Vec::new();
 
     // Fetch prices from all sources sequentially
-    for source_config in &token_req.sources {
-        // Determine which token_id to use for this source
-        let token_id = source_config
-            .token_id
+    for source_config in &data_req.sources {
+        // Determine which id to use for this source
+        let id = source_config
+            .id
             .as_ref()
-            .unwrap_or(&token_req.token_id);
+            .unwrap_or(&data_req.id);
 
         // Get API key for this source
         let api_key = match source_config.name.as_str() {
@@ -88,23 +88,23 @@ fn process_token_request(
         };
 
         // Fetch price from source (with custom config support)
-        match fetch_price_with_config(&source_config.name, token_id, api_key, source_config.custom.as_ref()) {
+        match fetch_price_with_config(&source_config.name, id, api_key, source_config.custom.as_ref()) {
             Ok(price) => source_prices.push(price),
             Err(e) => errors.push(format!("{}: {}", source_config.name, e)),
         }
     }
 
     // Check if we have enough successful responses
-    if source_prices.len() < token_req.min_sources_num {
+    if source_prices.len() < data_req.min_sources_num {
         let error_msg = format!(
             "Not enough sources responded ({}/{}). Errors: {}",
             source_prices.len(),
-            token_req.min_sources_num,
+            data_req.min_sources_num,
             errors.join(", ")
         );
 
-        return TokenResponse {
-            token: token_req.token_id.clone(),
+        return DataResponse {
+            id: data_req.id.clone(),
             data: None,
             message: Some(error_msg),
         };
@@ -136,19 +136,19 @@ fn process_token_request(
                 deviation, max_deviation
             );
 
-            return TokenResponse {
-                token: token_req.token_id.clone(),
+            return DataResponse {
+                id: data_req.id.clone(),
                 data: None,
                 message: Some(error_msg),
             };
         }
 
         // Aggregate numeric values
-        match aggregation::aggregate_prices(&source_prices, &token_req.aggregation_method) {
+        match aggregation::aggregate_prices(&source_prices, &data_req.aggregation_method) {
             Ok(price) => types::DataValue::Number(price),
             Err(e) => {
-                return TokenResponse {
-                    token: token_req.token_id.clone(),
+                return DataResponse {
+                    id: data_req.id.clone(),
                     data: None,
                     message: Some(format!("Aggregation failed: {}", e)),
                 };
@@ -167,7 +167,7 @@ fn process_token_request(
             })
             .collect();
 
-        let aggregation_label = match token_req.aggregation_method {
+        let aggregation_label = match data_req.aggregation_method {
             types::AggregationMethod::Average => "avg",
             types::AggregationMethod::Median => "median",
             types::AggregationMethod::WeightedAvg => "weighted",
@@ -190,8 +190,8 @@ fn process_token_request(
         message
     };
 
-    TokenResponse {
-        token: token_req.token_id.clone(),
+    DataResponse {
+        id: data_req.id.clone(),
         data: Some(PriceData {
             value: final_value,
             timestamp: latest_timestamp,

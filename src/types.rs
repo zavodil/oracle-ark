@@ -12,14 +12,15 @@ pub enum AggregationMethod {
     WeightedAvg, // Weighted average (currently uses equal weights)
 }
 
-/// Price source configuration
+/// Data source configuration
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PriceSource {
-    /// Source name: "coingecko", "coinmarketcap", "twelvedata", "exchangerate-api", "custom"
+    /// Source name: "coingecko", "coinmarketcap", "binance", "huobi", etc, or "custom"
     pub name: String,
 
-    /// Token ID specific to this source (null means use top-level token_id)
-    pub token_id: Option<String>,
+    /// Source-specific identifier (e.g., "BTCUSDT" for Binance, "near" for CoinGecko)
+    /// If not specified, uses the top-level request id
+    pub id: Option<String>,
 
     /// Custom source configuration (only for "custom" source)
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -67,16 +68,16 @@ fn default_http_method() -> String {
     "GET".to_string()
 }
 
-/// Token price request
+/// Data request (can be price, text, number, etc)
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct TokenRequest {
-    /// Main token identifier
-    pub token_id: String,
+pub struct DataRequest {
+    /// Request identifier (e.g., "near_price", "eur_usd_rate", "block_validator")
+    pub id: String,
 
-    /// List of price sources to query
+    /// List of data sources to query
     pub sources: Vec<PriceSource>,
 
-    /// Method to aggregate prices from multiple sources (default: average)
+    /// Method to aggregate values from multiple sources (default: average)
     #[serde(default = "default_aggregation_method")]
     pub aggregation_method: AggregationMethod,
 
@@ -96,8 +97,8 @@ fn default_min_sources() -> usize {
 /// Main request structure
 #[derive(Debug, Deserialize, Serialize)]
 pub struct OracleRequest {
-    /// List of tokens to fetch prices for
-    pub tokens: Vec<TokenRequest>,
+    /// List of data requests
+    pub requests: Vec<DataRequest>,
 
     /// Maximum allowed price deviation between sources (percentage)
     pub max_price_deviation_percent: f64,
@@ -136,13 +137,13 @@ pub struct PriceData {
     pub sources: Vec<String>,
 }
 
-/// Response for a single token
+/// Response for a single data request
 #[derive(Debug, Serialize, Deserialize)]
-pub struct TokenResponse {
-    /// Token identifier
-    pub token: String,
+pub struct DataResponse {
+    /// Request identifier
+    pub id: String,
 
-    /// Price data (None if failed to fetch)
+    /// Fetched data (None if failed)
     pub data: Option<PriceData>,
 
     /// Error/info message (None if successful)
@@ -152,8 +153,8 @@ pub struct TokenResponse {
 /// Main response structure
 #[derive(Debug, Serialize, Deserialize)]
 pub struct OracleResponse {
-    /// List of token responses
-    pub tokens: Vec<TokenResponse>,
+    /// List of data responses
+    pub results: Vec<DataResponse>,
 }
 
 /// Internal structure for source data result

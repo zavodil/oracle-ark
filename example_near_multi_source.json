@@ -1,0 +1,47 @@
+{
+  "tokens": [
+    {
+      "token_id": "near",
+      "sources": [
+        {
+          "name": "coingecko",
+          "token_id": "near",
+          "custom": null
+        },
+        {
+          "name": "binance",
+          "token_id": "NEARUSDT",
+          "custom": null
+        },
+        {
+          "name": "huobi",
+          "token_id": "nearusdt",
+          "custom": null
+        },
+        {
+          "name": "cryptocom",
+          "token_id": "NEAR_USDT",
+          "custom": null
+        },
+        {
+          "name": "kucoin",
+          "token_id": "NEAR-USDT",
+          "custom": null
+        },
+        {
+          "name": "gate",
+          "token_id": "near_usdt",
+          "custom": null
+        },
+        {
+          "name": "pyth",
+          "token_id": "0xc415de8d2eba7db216527dff4b60e8f3a5311c740dadb233e13e12547e226750",
+          "custom": null
+        }
+      ],
+      "aggregation_method": "median",
+      "min_sources_num": 4
+    }
+  ],
+  "max_price_deviation_percent": 10.0
+}

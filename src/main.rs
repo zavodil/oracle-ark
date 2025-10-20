@@ -159,6 +159,37 @@ fn process_token_request(
         source_prices[0].value.clone()
     };
 
+    // Build detailed message with source prices for numeric aggregation
+    let detailed_message = if has_numeric && source_prices.len() > 1 {
+        let source_details: Vec<String> = source_prices.iter()
+            .filter_map(|p| {
+                p.value.as_number().map(|n| format!("{}: {:.6}", p.source_name, n))
+            })
+            .collect();
+
+        let aggregation_label = match token_req.aggregation_method {
+            types::AggregationMethod::Average => "avg",
+            types::AggregationMethod::Median => "median",
+            types::AggregationMethod::WeightedAvg => "weighted",
+        };
+
+        if let types::DataValue::Number(final_price) = final_value {
+            let details = source_details.join(", ");
+            let agg_info = format!("{}, {}: {:.6}", details, aggregation_label, final_price);
+
+            // Add error info if any sources failed
+            if !errors.is_empty() {
+                Some(format!("{}. Errors: {}", agg_info, errors.join(", ")))
+            } else {
+                Some(agg_info)
+            }
+        } else {
+            message
+        }
+    } else {
+        message
+    };
+
     TokenResponse {
         token: token_req.token_id.clone(),
         data: Some(PriceData {
@@ -166,6 +197,6 @@ fn process_token_request(
             timestamp: latest_timestamp,
             sources: source_names,
         }),
-        message,
+        message: detailed_message,
     }
 }

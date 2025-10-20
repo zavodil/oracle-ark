@@ -302,26 +302,29 @@ pub fn fetch_cryptocom(instrument: &str) -> Result<SourcePrice, Box<dyn Error>> 
     let body = response.body()?;
     let json: Value = serde_json::from_slice(&body)?;
 
-    // Get last price (average of bid/ask)
-    let bid = json.get("result")
+    // Navigate to result.data[0] for the ticker data
+    let data = json.get("result")
         .and_then(|v| v.get("data"))
-        .and_then(|v| v.get("b"))
-        .and_then(|v| v.as_f64());
+        .and_then(|v| v.get(0))
+        .ok_or("Data array not found or empty")?;
 
-    let ask = json.get("result")
-        .and_then(|v| v.get("data"))
-        .and_then(|v| v.get("a"))
-        .and_then(|v| v.as_f64());
+    // Get prices: b (bid), k (ask), a (latest price)
+    let bid = data.get("b")
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.parse::<f64>().ok());
 
-    let last = json.get("result")
-        .and_then(|v| v.get("data"))
-        .and_then(|v| v.get("k"))
-        .and_then(|v| v.as_f64());
+    let ask = data.get("k")
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.parse::<f64>().ok());
+
+    let last = data.get("a")
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.parse::<f64>().ok());
 
     let price = match (bid, ask, last) {
-        (Some(b), Some(a), Some(l)) => (b + a + l) / 3.0,
-        (Some(b), Some(a), None) => (b + a) / 2.0,
-        (_, _, Some(l)) => l,
+        (Some(b), Some(k), Some(a)) => (b + k + a) / 3.0,
+        (Some(b), Some(k), None) => (b + k) / 2.0,
+        (_, _, Some(a)) => a,
         _ => return Err("Price not found in response".into()),
     };
 

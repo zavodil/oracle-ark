@@ -1,0 +1,27 @@
+{
+  "tokens": [
+    {
+      "token_id": "bitcoin",
+      "sources": [
+        {
+          "name": "coingecko",
+          "token_id": null
+        }
+      ],
+      "aggregation_method": "average",
+      "min_sources_num": 1
+    },
+    {
+      "token_id": "eur_usd",
+      "sources": [
+        {
+          "name": "exchangerate-api",
+          "token_id": "EUR/USD"
+        }
+      ],
+      "aggregation_method": "average",
+      "min_sources_num": 1
+    }
+  ],
+  "max_price_deviation_percent": 10.0
+}

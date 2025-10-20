@@ -1,0 +1,23 @@
+{
+  "tokens": [
+    {
+      "token_id": "near_last_block_validator",
+      "sources": [
+        {
+          "name": "custom",
+          "token_id": null,
+          "custom": {
+            "url": "https://api.nearblocks.io/v1/blocks/latest?limit=1",
+            "json_path": "blocks.0.author_account_id",
+            "value_type": "string",
+            "method": "GET",
+            "headers": []
+          }
+        }
+      ],
+      "aggregation_method": "average",
+      "min_sources_num": 1
+    }
+  ],
+  "max_price_deviation_percent": 10.0
+}

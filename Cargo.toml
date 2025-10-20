@@ -1,0 +1,18 @@
+[package]
+name = "oracle-ark"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "oracle-ark"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+wasi-http-client = "0.2"
+
+[profile.release]
+opt-level = "z"  # Optimize for size
+lto = true       # Link-time optimization
+strip = true     # Strip debug symbols

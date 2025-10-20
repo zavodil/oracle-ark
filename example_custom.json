@@ -1,0 +1,53 @@
+{
+  "tokens": [
+    {
+      "token_id": "bitcoin",
+      "sources": [
+        {
+          "name": "coingecko",
+          "token_id": null
+        }
+      ],
+      "aggregation_method": "average",
+      "min_sources_num": 1
+    },
+    {
+      "token_id": "elden_ring_cents",
+      "sources": [
+        {
+          "name": "custom",
+          "token_id": null,
+          "custom": {
+            "url": "https://store.steampowered.com/api/appdetails/?appids=1245620&cc=us",
+            "json_path": "1245620.data.price_overview.final",
+            "method": "GET",
+            "headers": []
+          }
+        }
+      ],
+      "aggregation_method": "average",
+      "min_sources_num": 1
+    },
+    {
+      "token_id": "near_protocol_github_stars",
+      "sources": [
+        {
+          "name": "custom",
+          "token_id": null,
+          "custom": {
+            "url": "https://api.github.com/repos/near/nearcore",
+            "json_path": "stargazers_count",
+            "method": "GET",
+            "headers": [
+              ["User-Agent", "Oracle-Ark/1.0"],
+              ["Accept", "application/vnd.github.v3+json"]
+            ]
+          }
+        }
+      ],
+      "aggregation_method": "average",
+      "min_sources_num": 1
+    }
+  ],
+  "max_price_deviation_percent": 10.0
+}

@@ -1,0 +1,20 @@
+{
+  "tokens": [
+    {
+      "token_id": "bitcoin",
+      "sources": [
+        {
+          "name": "coingecko",
+          "token_id": null
+        },
+        {
+          "name": "coinmarketcap",
+          "token_id": "BTC"
+        }
+      ],
+      "aggregation_method": "median",
+      "min_sources_num": 1
+    }
+  ],
+  "max_price_deviation_percent": 10.0
+}

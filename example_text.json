@@ -1,0 +1,52 @@
+{
+  "tokens": [
+    {
+      "token_id": "random_quote",
+      "sources": [
+        {
+          "name": "custom",
+          "token_id": null,
+          "custom": {
+            "url": "https://api.quotable.io/random?maxLength=100",
+            "json_path": "content",
+            "value_type": "string",
+            "method": "GET",
+            "headers": []
+          }
+        }
+      ],
+      "aggregation_method": "average",
+      "min_sources_num": 1
+    },
+    {
+      "token_id": "quote_author",
+      "sources": [
+        {
+          "name": "custom",
+          "token_id": null,
+          "custom": {
+            "url": "https://api.quotable.io/random?maxLength=100",
+            "json_path": "author",
+            "value_type": "string",
+            "method": "GET",
+            "headers": []
+          }
+        }
+      ],
+      "aggregation_method": "average",
+      "min_sources_num": 1
+    },
+    {
+      "token_id": "bitcoin_price",
+      "sources": [
+        {
+          "name": "coingecko",
+          "token_id": null
+        }
+      ],
+      "aggregation_method": "average",
+      "min_sources_num": 1
+    }
+  ],
+  "max_price_deviation_percent": 10.0
+}

@@ -76,11 +76,21 @@ pub struct TokenRequest {
     /// List of price sources to query
     pub sources: Vec<PriceSource>,
 
-    /// Method to aggregate prices from multiple sources
+    /// Method to aggregate prices from multiple sources (default: average)
+    #[serde(default = "default_aggregation_method")]
     pub aggregation_method: AggregationMethod,
 
-    /// Minimum number of sources that must respond successfully
+    /// Minimum number of sources that must respond successfully (default: 1)
+    #[serde(default = "default_min_sources")]
     pub min_sources_num: usize,
+}
+
+fn default_aggregation_method() -> AggregationMethod {
+    AggregationMethod::Average
+}
+
+fn default_min_sources() -> usize {
+    1
 }
 
 /// Main request structure

@@ -542,15 +542,16 @@ fn extract_json_value(json: &Value, path: &str, value_type: &ValueType) -> Resul
     let mut current = json;
 
     for part in parts {
-        // Try to parse part as array index first
-        if let Ok(index) = part.parse::<usize>() {
+        // Try as object key first (string)
+        if let Some(next) = current.get(part) {
+            current = next;
+        } else if let Ok(index) = part.parse::<usize>() {
+            // If not found as string key, try as array index
             current = current
                 .get(index)
                 .ok_or_else(|| format!("JSON path '{}' array index '{}' out of bounds", path, part))?;
         } else {
-            current = current
-                .get(part)
-                .ok_or_else(|| format!("JSON path '{}' not found at '{}'", path, part))?;
+            return Err(format!("JSON path '{}' not found at '{}'", path, part).into());
         }
     }
 

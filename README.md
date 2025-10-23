@@ -54,7 +54,7 @@ cargo build --release
 
 **Note**: Direct `wasmtime` CLI won't work because WASI HTTP requires component model linking. Use `wasi-test-runner` which handles this correctly.
 
-### 3. Deploy to NEAR Offshore
+### 3. Deploy to NEAR OutLayer
 
 ```bash
 # 1. Push to GitHub
@@ -84,7 +84,10 @@ near call offchainvm.testnet request_execution '{
     "max_execution_seconds": 30
   },
   "input_data": "{\"tokens\":[{\"token_id\":\"bitcoin\",\"sources\":[{\"name\":\"coingecko\",\"token_id\":null}],\"aggregation_method\":\"average\",\"min_sources_num\":1}],\"max_price_deviation_percent\":10.0}",
-  "encrypted_secrets": [...]
+  "secrets_ref": {
+    "profile": "default",
+    "account_id": "dev.testnet"
+  }
 }' --accountId your.testnet --deposit 0.1
 ```
 

@@ -501,6 +501,7 @@ pub fn fetch_custom(config: &CustomSourceConfig) -> Result<SourcePrice, Box<dyn 
 
     // Auto-add Authorization Bearer if API_KEY is in environment
     if let Ok(api_key) = env::var("API_KEY") {
+        eprintln!("✓ API_KEY found, string length: {} characters", api_key.len());
         let auth_header = format!("Bearer {}", api_key);
         request = request.header("Authorization", auth_header.as_str());
     }

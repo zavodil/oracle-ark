@@ -72,7 +72,7 @@ cd ../../keystore-worker
 }'
 
 # 3. Call contract
-near call offchainvm.testnet request_execution '{
+near call outlayer.testnet request_execution '{
   "code_source": {
     "repo": "https://github.com/YOUR_USERNAME/YOUR_REPO",
     "commit": "main",

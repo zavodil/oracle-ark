@@ -62,6 +62,11 @@ pub struct CustomSourceConfig {
     /// Optional HTTP headers as key-value pairs
     #[serde(default)]
     pub headers: Vec<(String, String)>,
+
+    /// Optional JSON body for POST/PUT requests (serialized as JSON string)
+    /// Example: {"method": "eth_getBalance", "params": ["0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045"]}
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body: Option<serde_json::Value>,
 }
 
 fn default_http_method() -> String {

@@ -18,6 +18,73 @@ Decentralized price oracle that fetches cryptocurrency and commodity prices from
 | **CoinGecko** | Crypto | Optional | `"bitcoin"`, `"ethereum"` | BTC, ETH, NEAR |
 | **CoinMarketCap** | Crypto | Required | `"BTC"`, `"ETH"` | BTC, ETH, SOL |
 | **TwelveData** | Commodities, Forex | Optional | `"XAU/USD"`, `"BRENT/USD"` | Gold, Oil, EUR/USD |
+| **Custom** | Any | Configurable | User-defined | See [Custom Sources](#custom-sources) |
+
+## Custom Sources
+
+You can integrate any HTTP API using the `custom` source type. Supports both GET and POST requests with custom headers and JSON body.
+
+### Example: Alchemy Ethereum Balance (POST with JSON body)
+
+```json
+{
+  "requests": [
+    {
+      "id": "eth_balance_wei",
+      "sources": [
+        {
+          "name": "custom",
+          "custom": {
+            "url": "https://eth-mainnet.g.alchemy.com/v2",
+            "method": "POST",
+            "headers": [],
+            "body": {
+              "method": "eth_getBalance",
+              "params": ["0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045", "latest"],
+              "id": 1,
+              "jsonrpc": "2.0"
+            },
+            "json_path": "result",
+            "value_type": "string"
+          }
+        }
+      ],
+      "aggregation_method": "average",
+      "min_sources_num": 1
+    }
+  ],
+  "max_price_deviation_percent": 10.0
+}
+```
+
+### Example: GitHub API (GET with headers)
+
+```json
+{
+  "name": "custom",
+  "custom": {
+    "url": "https://api.github.com/repos/near/nearcore",
+    "method": "GET",
+    "headers": [
+      ["User-Agent", "Oracle-Ark/1.0"],
+      ["Accept", "application/vnd.github.v3+json"]
+    ],
+    "json_path": "stargazers_count",
+    "value_type": "number"
+  }
+}
+```
+
+### Custom Config Fields
+
+- `url` (string, required): HTTP endpoint URL
+- `method` (string, optional): `"GET"` (default) or `"POST"`
+- `headers` (array, optional): Array of `[key, value]` pairs for HTTP headers
+- `body` (object, optional): JSON body for POST requests (auto-serialized)
+- `json_path` (string, required): Dot notation path to extract value (e.g., `"result"`, `"data.price"`)
+- `value_type` (string, optional): `"number"` (default), `"string"`, or `"boolean"`
+
+**Note**: If `API_KEY` environment variable is set (via encrypted secrets), it will be automatically added as `Authorization: Bearer {API_KEY}` header.
 
 ## Quick Start
 

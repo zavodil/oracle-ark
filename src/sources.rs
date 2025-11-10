@@ -490,7 +490,21 @@ pub fn fetch_custom(config: &CustomSourceConfig) -> Result<SourcePrice, Box<dyn 
     // Build HTTP request
     let mut request = match config.method.to_uppercase().as_str() {
         "GET" => Client::new().get(&config.url),
-        "POST" => Client::new().post(&config.url),
+        "POST" => {
+            let mut req = Client::new().post(&config.url);
+
+            // Add body if provided
+            if let Some(body) = &config.body {
+                let body_str = serde_json::to_string(body)?;
+                req = req.body(body_str.as_bytes());
+                // Auto-add Content-Type header if not already provided
+                if !config.headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("content-type")) {
+                    req = req.header("Content-Type", "application/json");
+                }
+            }
+
+            req
+        }
         _ => return Err(format!("Unsupported HTTP method: {}", config.method).into()),
     };
 

@@ -3,6 +3,12 @@ use serde::{Deserialize, Serialize};
 // Maximum number of tokens allowed per request
 pub const MAX_TOKENS_PER_REQUEST: usize = 10;
 
+// Maximum timeout for each HTTP request in seconds
+pub const MAX_REQUEST_TIMEOUT_SECS: u64 = 10;
+
+// Maximum number of concurrent HTTP requests
+pub const MAX_CONCURRENT_REQUESTS: usize = 10;
+
 /// Aggregation method for combining prices from multiple sources
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -99,6 +105,35 @@ fn default_min_sources() -> usize {
     1
 }
 
+/// Execution configuration
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ExecutionConfig {
+    /// Maximum number of concurrent HTTP requests (default: 5)
+    #[serde(default = "default_max_concurrent_requests")]
+    pub max_concurrent_requests: usize,
+
+    /// Maximum timeout for each HTTP request in seconds (default: 10)
+    #[serde(default = "default_request_timeout_secs")]
+    pub request_timeout_secs: u64,
+}
+
+fn default_max_concurrent_requests() -> usize {
+    MAX_CONCURRENT_REQUESTS
+}
+
+fn default_request_timeout_secs() -> u64 {
+    MAX_REQUEST_TIMEOUT_SECS
+}
+
+impl Default for ExecutionConfig {
+    fn default() -> Self {
+        Self {
+            max_concurrent_requests: MAX_CONCURRENT_REQUESTS,
+            request_timeout_secs: MAX_REQUEST_TIMEOUT_SECS,
+        }
+    }
+}
+
 /// Main request structure
 #[derive(Debug, Deserialize, Serialize)]
 pub struct OracleRequest {
@@ -107,6 +142,10 @@ pub struct OracleRequest {
 
     /// Maximum allowed price deviation between sources (percentage)
     pub max_price_deviation_percent: f64,
+
+    /// Optional execution configuration
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config: Option<ExecutionConfig>,
 }
 
 /// Data value type - can be number, text, or boolean

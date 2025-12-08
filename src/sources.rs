@@ -433,8 +433,8 @@ pub fn fetch_gate(pair: &str) -> Result<SourcePrice, Box<dyn Error>> {
 
 /// Fetch price from Pyth Network
 pub fn fetch_pyth(price_id: &str) -> Result<SourcePrice, Box<dyn Error>> {
-    // Remove 0x prefix if present
-    let clean_id = price_id.strip_prefix("0x").unwrap_or(price_id);
+    // Remove 0x prefix if present (for URL formatting)
+    let _clean_id = price_id.strip_prefix("0x").unwrap_or(price_id);
     let url = format!("https://hermes.pyth.network/v2/updates/price/latest?ids[]={}", price_id);
 
     let response = Client::new()

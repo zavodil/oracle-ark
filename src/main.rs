@@ -7,7 +7,8 @@ use types::*;
 use std::env;
 use std::io::{self, Read, Write};
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Read input from stdin
     let mut input_string = String::new();
     io::stdin().read_to_string(&mut input_string)?;
@@ -35,7 +36,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Get execution config or use defaults
     let config = request.config.unwrap_or_default();
 
-    // Process all data requests in parallel
+    // Process all data requests in parallel (concurrent async)
     let data_responses = parallel::process_data_requests_parallel(
         request.requests,
         request.max_price_deviation_percent,
@@ -43,7 +44,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         coinmarketcap_key.as_deref(),
         twelvedata_key.as_deref(),
         &config,
-    );
+    ).await;
 
     // Build response
     let oracle_response = OracleResponse {

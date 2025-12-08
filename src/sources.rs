@@ -243,6 +243,38 @@ pub fn fetch_binance(symbol: &str) -> Result<SourcePrice, Box<dyn Error>> {
     })
 }
 
+/// Fetch price from Binance.US (alternative for US users)
+pub fn fetch_binance_us(symbol: &str) -> Result<SourcePrice, Box<dyn Error>> {
+    let url = format!("https://api.binance.us/api/v3/ticker/price?symbol={}", symbol);
+
+    let response = Client::new()
+        .get(&url)
+        .connect_timeout(Duration::from_secs(10))
+        .send()?;
+
+    let status = response.status();
+    if status < 200 || status >= 300 {
+        return Err(format!("HTTP {}", status).into());
+    }
+
+    let body = response.body()?;
+    let json: Value = serde_json::from_slice(&body)?;
+
+    let price = json
+        .get("price")
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.parse::<f64>().ok())
+        .ok_or("Price not found in response")?;
+
+    let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+
+    Ok(SourcePrice {
+        source_name: "binance-us".to_string(),
+        value: DataValue::Number(price),
+        timestamp,
+    })
+}
+
 /// Fetch price from Huobi
 pub fn fetch_huobi(symbol: &str) -> Result<SourcePrice, Box<dyn Error>> {
     let url = format!("https://api.huobi.pro/market/detail/merged?symbol={}", symbol);
@@ -618,6 +650,7 @@ pub fn fetch_price(
         "twelvedata" => fetch_twelvedata(token_id, api_key),
         "exchangerate-api" => fetch_exchangerate_api(token_id, api_key),
         "binance" => fetch_binance(token_id),
+        "binance-us" => fetch_binance_us(token_id),
         "huobi" => fetch_huobi(token_id),
         "cryptocom" => fetch_cryptocom(token_id),
         "kucoin" => fetch_kucoin(token_id),

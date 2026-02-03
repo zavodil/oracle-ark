@@ -1,0 +1,21 @@
+[package]
+name = "oracle-ark-sources"
+version = "0.1.0"
+edition = "2021"
+description = "Shared price sources for oracle-ark (WASI and scheduler)"
+
+[features]
+default = []
+wasi = ["wasi-http-client"]
+async = ["reqwest"]
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+anyhow = "1.0"
+
+# Optional: for WASI
+wasi-http-client = { version = "0.2", optional = true }
+
+# Optional: for async (scheduler)
+reqwest = { version = "0.12", features = ["json"], optional = true }

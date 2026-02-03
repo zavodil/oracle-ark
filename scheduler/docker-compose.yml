@@ -1,0 +1,15 @@
+version: '3.8'
+
+services:
+  oracle-scheduler:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file:
+      - .env
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

@@ -1,0 +1,29 @@
+[package]
+name = "oracle-scheduler"
+version = "0.1.0"
+edition = "2021"
+description = "Scheduler for proactive oracle price updates via OutLayer WASI"
+
+[[bin]]
+name = "oracle-scheduler"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", features = ["json", "rustls-tls", "gzip"], default-features = false }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+dotenvy = "0.15"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1.0"
+base64 = "0.22"
+futures = "0.3"
+
+# Shared sources library
+oracle-ark-sources = { path = "../sources", features = ["async"] }
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true

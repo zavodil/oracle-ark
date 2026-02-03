@@ -1,0 +1,23 @@
+{
+  "requests": [
+    {
+      "id": "near_price",
+      "sources": [
+        {"name": "coingecko", "id": "near"},
+        {"name": "binance", "id": "NEARUSDT"},
+        {"name": "huobi", "id": "nearusdt"},
+        {"name": "cryptocom", "id": "NEAR_USDT"},
+        {"name": "kucoin", "id": "NEAR-USDT"},
+        {"name": "gate", "id": "near_usdt"},
+        {"name": "pyth", "id": "0xc415de8d2eba7db216527dff4b60e8f3a5311c740dadb233e13e12547e226750"}
+      ],
+      "aggregation_method": "median",
+      "min_sources_num": 4
+    }
+  ],
+  "max_price_deviation_percent": 10.0,
+  "config": {
+    "max_concurrent_requests": 7,
+    "request_timeout_secs": 5
+  }
+}

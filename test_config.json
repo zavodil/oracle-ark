@@ -1,0 +1,39 @@
+{
+  "requests": [
+    {
+      "id": "bitcoin",
+      "sources": [
+        {
+          "name": "coingecko"
+        },
+        {
+          "name": "binance",
+          "id": "BTCUSDT"
+        },
+        {
+          "name": "cryptocom",
+          "id": "BTC_USDT"
+        },
+        {
+          "name": "kucoin",
+          "id": "BTC-USDT"
+        },
+        {
+          "name": "huobi",
+          "id": "btcusdt"
+        },
+        {
+          "name": "gate",
+          "id": "btc_usdt"
+        }
+      ],
+      "aggregation_method": "median",
+      "min_sources_num": 3
+    }
+  ],
+  "max_price_deviation_percent": 5.0,
+  "config": {
+    "max_concurrent_requests": 3,
+    "request_timeout_secs": 5
+  }
+}

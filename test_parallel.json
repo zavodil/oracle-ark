@@ -1,0 +1,45 @@
+{
+  "requests": [
+    {
+      "id": "bitcoin",
+      "sources": [
+        {
+          "name": "coingecko"
+        },
+        {
+          "name": "binance",
+          "id": "BTCUSDT"
+        },
+        {
+          "name": "cryptocom",
+          "id": "BTC_USDT"
+        },
+        {
+          "name": "kucoin",
+          "id": "BTC-USDT"
+        }
+      ],
+      "aggregation_method": "median",
+      "min_sources_num": 2
+    },
+    {
+      "id": "ethereum",
+      "sources": [
+        {
+          "name": "coingecko"
+        },
+        {
+          "name": "binance",
+          "id": "ETHUSDT"
+        },
+        {
+          "name": "huobi",
+          "id": "ethusdt"
+        }
+      ],
+      "aggregation_method": "average",
+      "min_sources_num": 2
+    }
+  ],
+  "max_price_deviation_percent": 5.0
+}

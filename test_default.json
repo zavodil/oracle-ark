@@ -1,0 +1,19 @@
+{
+  "requests": [
+    {
+      "id": "ethereum",
+      "sources": [
+        {
+          "name": "coingecko"
+        },
+        {
+          "name": "binance",
+          "id": "ETHUSDT"
+        }
+      ],
+      "aggregation_method": "average",
+      "min_sources_num": 1
+    }
+  ],
+  "max_price_deviation_percent": 10.0
+}

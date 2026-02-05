@@ -3,10 +3,12 @@ version: '3.8'
 services:
   oracle-scheduler:
     build:
-      context: .
-      dockerfile: Dockerfile
+      context: ..
+      dockerfile: scheduler/Dockerfile
     env_file:
       - .env
+    volumes:
+      - ../tokens.json:/etc/oracle-scheduler/tokens.json:ro
     restart: unless-stopped
     logging:
       driver: json-file

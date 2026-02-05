@@ -8,7 +8,7 @@ edition = "2021"
 wasm-opt-args = ["--enable-bulk-memory"]
 
 [lib]
-crate-type = ["cdylib", "rlib"]
+crate-type = ["cdylib"]
 
 [features]
 abi = ["borsh/unstable__schema"]

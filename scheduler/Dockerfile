@@ -29,9 +29,6 @@ RUN apt-get update && apt-get install -y \
 # Copy binary from builder
 COPY --from=builder /app/target/release/oracle-scheduler /usr/local/bin/
 
-# Copy tokens.json
-COPY tokens.json /etc/oracle-scheduler/tokens.json
-
 # Set environment defaults
 ENV RUST_LOG=info
 ENV TOKENS_CONFIG=/etc/oracle-scheduler/tokens.json

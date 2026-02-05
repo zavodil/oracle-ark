@@ -1,6 +1,6 @@
 # Pyth-Compatible Wrapper for Oracle-Ark
 
-NEAR smart contract that implements the [Pyth receiver contract](https://github.com/pyth-network/pyth-crosschain/tree/main/target_chains/near/receiver) API, but internally uses [Oracle-Ark](https://github.com/nicholasbarger/near-oracle-ark) (`price-oracle.near`) for price data.
+NEAR smart contract that implements the [Pyth receiver contract](https://github.com/pyth-network/pyth-crosschain/tree/main/target_chains/near/receiver) API, but internally uses [Oracle-Ark](https://github.com/zavodil/oracle-ark/tree/main/contract) (`price-oracle.near`) for price data.
 
 DeFi protocols currently using Pyth can switch to Oracle-Ark with **zero code changes** — just update the contract address.
 

@@ -28,19 +28,19 @@ TEE-Secured Price Oracle delivers cryptocurrency prices with **instant response 
 
 > **Note:** The scheduler runs on **mainnet** only. On testnet, prices are fetched on-demand to save TEE resources. Anyone can run their own scheduler for testnet using the `scheduler/` directory.
 
-### Architecture
+### Price Oracle Architecture
 
 ```
 ┌─────────────────┐     monitors      ┌──────────────────────┐
 │    Scheduler    │ ───────────────>  │   TEE Public Storage │
-│  (external VPS) │                   │   - price:wrap.near  │
+│    (external)   │                   │   - price:wrap.near  │
 └────────┬────────┘                   │   - price:aurora     │
          │                            │   - price:nbtc...    │
          │ if stale or deviation      └──────────────────────┘
          ↓
 ┌─────────────────┐                   ┌──────────────────────┐
 │    OutLayer     │   execute WASI    │     TEE Worker       │
-│   Coordinator   │ ───────────────>  │   (Intel TDX)        │
+│   Coordinator   │ ───────────────>  │     (Intel TDX)      │
 └─────────────────┘                   │                      │
                                       │  Fetches from 9+     │
                                       │  sources in parallel │
@@ -49,7 +49,7 @@ TEE-Secured Price Oracle delivers cryptocurrency prices with **instant response 
                                       │  ↓                   │
                                       │  Stores in TEE       │
                                       │  ↓                   │
-                                      │  Updates contract    │
+                                      │  Can update contract │
                                       └──────────────────────┘
 ```
 

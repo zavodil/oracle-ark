@@ -28,7 +28,49 @@ TEE-Secured Price Oracle delivers cryptocurrency prices with **instant response 
 
 > **Note:** The scheduler runs on **mainnet** only. On testnet, prices are fetched on-demand to save TEE resources. Anyone can run their own scheduler for testnet using the `scheduler/` directory.
 
-### Price Oracle Architecture
+### Contract Integration Flow
+
+How your contract gets prices via `oracle_call`:
+
+```
+┌──────────────────┐                          ┌─────────────────┐
+│   Your Contract  │                          │  Price Oracle   │
+│                  │                          │  price-oracle.  │
+└────────┬─────────┘                          └────────┬────────┘
+         │                                             │
+         │  1. oracle_call(receiver_id, asset_ids)     │
+         │ ─────────────────────────────────────────>  │
+         │         (attached: 0.02 NEAR)               │
+         │                                             │
+         │                             ┌───────────────┴───────────────┐
+         │                             │ 2. yield: request to OutLayer │
+         │                             │    (if cache stale)           │
+         │                             └───────────────┬───────────────┘
+         │                                             │
+         │                                             ▼
+         │                             ┌───────────────────────────────┐
+         │                             │      TEE Worker (Intel TDX)   │
+         │                             │   - Fetch from 9+ sources     │
+         │                             │   - Aggregate (median)        │
+         │                             │   - Return to OutLayer        │
+         │                             └───────────────┬───────────────┘
+         │                                             │
+         │                             ┌───────────────┴───────────────┐
+         │                             │ 3. resume: continue execution │
+         │                             └───────────────┬───────────────┘
+         │                                             │
+         │  4. oracle_on_call(sender_id, data, msg)    │
+         │ <─────────────────────────────────────────  │
+         │         (callback with PriceData)           │
+         │                                             │
+         ▼                                             ▼
+```
+
+**If cache is fresh:** Steps 2-3 are skipped, callback happens immediately.
+
+### Internal Architecture
+
+How the scheduler keeps prices warm in TEE:
 
 ```
 ┌─────────────────┐     monitors      ┌──────────────────────┐
@@ -76,35 +118,36 @@ TEE-Secured Price Oracle delivers cryptocurrency prices with **instant response 
 
 ## Quick Start
 
-### View Cached Prices (free)
+### Request Prices (recommended)
+
+This is an **on-demand oracle** — prices are fetched when you need them. Use `oracle_call` to get prices with a callback:
 
 ```bash
-near view price-oracle.near get_price_data '{"asset_ids": ["wrap.near", "aurora"]}' --networkId mainnet
-```
-
-Response:
-```json
-{
-  "timestamp": "1706889600000000000",
-  "recency_duration_sec": 300,
-  "prices": [
-    { "asset_id": "wrap.near", "price": { "multiplier": "500000000", "decimals": 8 } },
-    { "asset_id": "aurora", "price": { "multiplier": "320000000000", "decimals": 8 } }
-  ]
-}
-```
-
-**Price conversion:** `multiplier / 10^decimals = USD`
-- `500000000 / 10^8 = $5.00` (NEAR)
-- `320000000000 / 10^8 = $3200.00` (ETH)
-
-### Request Fresh Prices
-
-```bash
-near call price-oracle.near request_price_data '{
-  "asset_ids": ["wrap.near"]
+near call price-oracle.near oracle_call '{
+  "receiver_id": "your-contract.near",
+  "asset_ids": ["wrap.near", "aurora"],
+  "msg": ""
 }' --accountId your.near --deposit 0.02 --gas 200000000000000
 ```
+
+Your contract receives prices via `oracle_on_call` callback.
+
+### View Cached Prices (unreliable)
+
+> **Warning:** Cached prices are only available if someone recently paid for an update. Due to the **on-demand nature** of this oracle, the cache is usually empty or stale — prices are fetched when needed for specific operations (liquidations, borrowing, swaps), not stored permanently.
+>
+> **This is by design:** Unlike traditional oracles with a central price feed contract, this oracle delivers prices directly to your contract via callback. Any contract can integrate without intermediaries. **Don't rely on view methods for production** — use `oracle_call` or `request_price_data` instead.
+
+```bash
+# May return null prices if cache is stale!
+near view price-oracle.near get_price_data '{"asset_ids": ["wrap.near"]}' --networkId mainnet
+```
+
+### Price Format
+
+**Conversion:** `multiplier / 10^decimals = USD`
+- `500000000 / 10^8 = $5.00` (NEAR)
+- `320000000000 / 10^8 = $3200.00` (ETH)
 
 ---
 

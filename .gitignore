@@ -2,3 +2,5 @@
 Cargo.lock
 *.wasm
 .DS_Store
+oracle-prices-ui/.next
+oracle-prices-ui/out

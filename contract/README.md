@@ -1,6 +1,11 @@
 # Oracle-Ark Contract
 
-NEAR price oracle based on [NEAR Native Price Oracle](https://github.com/NearDeFi/price-oracle) (`priceoracle.near`), enhanced with TEE-verified prices via [OutLayer](https://outlayer.fastnear.com).
+TEE-secured price oracle that **recreates the interface** of the original [NEAR Native Price Oracle](https://github.com/NearDeFi/price-oracle) (`priceoracle.near`) with enhancements:
+- TEE-verified prices via [OutLayer](https://outlayer.fastnear.com) (Intel TDX)
+- Custom data fetching from any HTTP API
+- On-demand pricing with automatic fallback
+
+**Drop-in replacement:** Existing integrations with `priceoracle.near` work without code changes — just update the contract address.
 
 **Contract addresses:**
 - Mainnet: `price-oracle.near`

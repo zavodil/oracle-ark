@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
-// Default max age for cached prices (5 minutes)
-pub const DEFAULT_MAX_AGE_SECS: u64 = 300;
+// Default max age for cached prices (2 minutes)
+pub const DEFAULT_MAX_AGE_SECS: u64 = 120;
 
 // Price deviation threshold for alerts (5%)
 pub const PRICE_DEVIATION_ALERT_THRESHOLD: f64 = 5.0;
@@ -68,7 +68,7 @@ pub enum OracleCommand {
     GetPrices {
         /// Whitelisted tokens to get prices for
         tokens: Vec<String>,
-        /// Maximum age of cached price in seconds (default: 300)
+        /// Maximum age of cached price in seconds (default: 120)
         #[serde(default = "default_max_age")]
         max_age_secs: u64,
         /// How to aggregate prices from multiple sources (default: median)

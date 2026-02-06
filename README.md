@@ -1,385 +1,497 @@
-# Oracle Ark - On-Demand Price Oracle
+# TEE-Secured Price Oracle
 
-Decentralized price oracle that fetches cryptocurrency and commodity prices from multiple sources, aggregates them, and returns validated data.
+**On-Demand Oracle with Sustainable Economics**
 
-## Features
+Based on [OutLayer](https://outlayer.fastnear.com) — verifiable off-chain computation for NEAR Protocol.
 
-- ✅ **Multiple sources**: CoinGecko, CoinMarketCap, TwelveData
-- ✅ **Aggregation methods**: Average, Median, Weighted Average
-- ✅ **Price validation**: Configurable max deviation between sources
-- ✅ **Encrypted API keys**: Via WASI environment variables
-- ✅ **Batch requests**: Up to 10 tokens per request
-- ✅ **WASI P2**: Uses `wasi-http-client` for real HTTP requests
+[Dashboard & Playground](https://price-oracle.outlayer.ai/) | [GitHub](https://github.com/zavodil/oracle-ark)
 
-## Supported Sources
+---
 
-| Source | Type | API Key | Token Format | Examples |
-|--------|------|---------|--------------|----------|
-| **CoinGecko** | Crypto | Optional | `"bitcoin"`, `"ethereum"` | BTC, ETH, NEAR |
-| **CoinMarketCap** | Crypto | Required | `"BTC"`, `"ETH"` | BTC, ETH, SOL |
-| **TwelveData** | Commodities, Forex | Optional | `"XAU/USD"`, `"BRENT/USD"` | Gold, Oil, EUR/USD |
-| **Custom** | Any | Configurable | User-defined | See [Custom Sources](#custom-sources) |
+## How It Works
 
-## Custom Sources
+TEE-Secured Price Oracle delivers cryptocurrency prices with **instant response times** and **zero trust** in external operators.
 
-You can integrate any HTTP API using the `custom` source type. Supports both GET and POST requests with custom headers and JSON body.
+### Key Principles
 
-### Example: Alchemy Ethereum Balance (POST with JSON body)
+1. **Warm Prices in TEE** — Prices are pre-fetched and cached inside TEE (Trusted Execution Environment). When your contract requests a price, it's delivered instantly without waiting for external API calls.
 
-```json
-{
-  "requests": [
-    {
-      "id": "eth_balance_wei",
-      "sources": [
-        {
-          "name": "custom",
-          "custom": {
-            "url": "https://eth-mainnet.g.alchemy.com/v2",
-            "method": "POST",
-            "headers": [],
-            "body": {
-              "method": "eth_getBalance",
-              "params": ["0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045", "latest"],
-              "id": 1,
-              "jsonrpc": "2.0"
-            },
-            "json_path": "result",
-            "value_type": "string"
-          }
-        }
-      ],
-      "aggregation_method": "average",
-      "min_sources_num": 1
-    }
-  ],
-  "max_price_deviation_percent": 10.0
-}
+2. **Zero Trust** — All price fetching and aggregation happens exclusively inside Intel TDX enclave. No external operator ever sees or touches the raw price data.
+
+3. **Permissionless Updates** — An external scheduler monitors price freshness and triggers TEE updates when:
+   - Prices become stale (time-based, default: 60 seconds)
+   - High volatility detected (price deviation > 1% from stored value)
+
+   Anyone can run their own scheduler or trigger updates manually.
+
+4. **On-Demand Fallback** — If cached prices are stale, the WASI worker fetches fresh data first, then returns it. You always get a price.
+
+> **Note:** The scheduler runs on **mainnet** only. On testnet, prices are fetched on-demand to save TEE resources. Anyone can run their own scheduler for testnet using the `scheduler/` directory.
+
+### Architecture
+
+```
+┌─────────────────┐     monitors      ┌──────────────────────┐
+│    Scheduler    │ ───────────────>  │   TEE Public Storage │
+│  (external VPS) │                   │   - price:wrap.near  │
+└────────┬────────┘                   │   - price:aurora     │
+         │                            │   - price:nbtc...    │
+         │ if stale or deviation      └──────────────────────┘
+         ↓
+┌─────────────────┐                   ┌──────────────────────┐
+│    OutLayer     │   execute WASI    │     TEE Worker       │
+│   Coordinator   │ ───────────────>  │   (Intel TDX)        │
+└─────────────────┘                   │                      │
+                                      │  Fetches from 9+     │
+                                      │  sources in parallel │
+                                      │  ↓                   │
+                                      │  Aggregates (median) │
+                                      │  ↓                   │
+                                      │  Stores in TEE       │
+                                      │  ↓                   │
+                                      │  Updates contract    │
+                                      └──────────────────────┘
 ```
 
-### Example: GitHub API (GET with headers)
+---
 
-```json
-{
-  "name": "custom",
-  "custom": {
-    "url": "https://api.github.com/repos/near/nearcore",
-    "method": "GET",
-    "headers": [
-      ["User-Agent", "Oracle-Ark/1.0"],
-      ["Accept", "application/vnd.github.v3+json"]
-    ],
-    "json_path": "stargazers_count",
-    "value_type": "number"
-  }
-}
-```
+## Deployments
 
-### Custom Config Fields
+| Contract | Testnet | Mainnet |
+|----------|---------|---------|
+| **Price Oracle** (main) | `price-oracle.testnet` | `price-oracle.near` |
+| **Simple Wrapper** | `price-oracle-wrapper.testnet` | `price-oracle-wrapper.near` |
+| **Pyth-Compatible Wrapper** | `price-oracle-pyth.testnet` | `price-oracle-pyth.near` |
 
-- `url` (string, required): HTTP endpoint URL
-- `method` (string, optional): `"GET"` (default) or `"POST"`
-- `headers` (array, optional): Array of `[key, value]` pairs for HTTP headers
-- `body` (object, optional): JSON body for POST requests (auto-serialized)
-- `json_path` (string, required): Dot notation path to extract value (e.g., `"result"`, `"data.price"`)
-- `value_type` (string, optional): `"number"` (default), `"string"`, or `"boolean"`
+**OutLayer Project ID:**
+- Mainnet: `price-oracle.near/price-oracle`
+- Testnet: `zavodil2.testnet/price-oracle`
 
-**Note**: If `API_KEY` environment variable is set (via encrypted secrets), it will be automatically added as `Authorization: Bearer {API_KEY}` header.
+**Dashboard:** https://price-oracle.outlayer.ai/
+- Live prices display
+- Playground — run transactions and see how the oracle works
+- Documentation portal — integration guides and API reference
+
+---
 
 ## Quick Start
 
-### 1. Build
+### View Cached Prices (free)
 
 ```bash
-./build.sh
-
-# Or manually:
-rustup target add wasm32-wasip2
-cargo build --target wasm32-wasip2 --release
+near view price-oracle.near get_price_data '{"asset_ids": ["wrap.near", "aurora"]}' --networkId mainnet
 ```
 
-### 2. Test Locally
-
-```bash
-# Use wasi-test-runner (handles WASI HTTP component properly)
-cd ../wasi-test-runner
-cargo build --release
-
-# Test single token (Bitcoin from CoinGecko)
-./target/release/wasi-test \
-  --wasm ../oracle-ark/target/wasm32-wasip2/release/oracle-ark.wasm \
-  --input-file ../oracle-ark/example_request.json \
-  --max-instructions 50000000000
-
-# Test multiple tokens (Bitcoin + Gold + EUR/USD)
-./target/release/wasi-test \
-  --wasm .../oracle-ark/target/wasm32-wasip2/release/oracle-ark.wasm \
-  --input-file ../oracle-ark/example_multi.json \
-  --max-instructions 50000000000 \
-  --verbose
-```
-
-**Note**: Direct `wasmtime` CLI won't work because WASI HTTP requires component model linking. Use `wasi-test-runner` which handles this correctly.
-
-### 3. Deploy to NEAR OutLayer
-
-```bash
-# 1. Push to GitHub
-git init
-git add .
-git commit -m "Oracle implementation"
-git push
-
-# 2. Encrypt API keys (optional)
-cd ../../keystore-worker
-./scripts/encrypt_secrets.py '{
-  "COINGECKO_API_KEY": "your-key",
-  "COINMARKETCAP_API_KEY": "your-key",
-  "TWELVEDATA_API_KEY": "your-key"
-}'
-
-# 3. Call contract
-near call outlayer.testnet request_execution '{
-  "code_source": {
-    "repo": "https://github.com/YOUR_USERNAME/YOUR_REPO",
-    "commit": "main",
-    "build_target": "wasm32-wasip2"
-  },
-  "resource_limits": {
-    "max_instructions": 50000000000,
-    "max_memory_mb": 128,
-    "max_execution_seconds": 30
-  },
-  "input_data": "{\"tokens\":[{\"token_id\":\"bitcoin\",\"sources\":[{\"name\":\"coingecko\",\"token_id\":null}],\"aggregation_method\":\"average\",\"min_sources_num\":1}],\"max_price_deviation_percent\":10.0}",
-  "secrets_ref": {
-    "profile": "default",
-    "account_id": "dev.testnet"
-  }
-}' --accountId your.testnet --deposit 0.1
-```
-
-## Request Format
-
+Response:
 ```json
 {
-  "tokens": [
-    {
-      "token_id": "bitcoin",
-      "sources": [
-        {
-          "name": "coingecko",
-          "token_id": null
-        },
-        {
-          "name": "coinmarketcap",
-          "token_id": "BTC"
-        }
-      ],
-      "aggregation_method": "median",
-      "min_sources_num": 2
-    },
-    {
-      "token_id": "gold",
-      "sources": [
-        {
-          "name": "twelvedata",
-          "token_id": "XAU/USD"
-        }
-      ],
-      "aggregation_method": "average",
-      "min_sources_num": 1
-    }
-  ],
-  "max_price_deviation_percent": 5.0
-}
-```
-
-### Fields
-
-- `token_id`: Main identifier
-- `sources[].name`: `"coingecko"` | `"coinmarketcap"` | `"twelvedata"`
-- `sources[].token_id`: Source-specific ID (null = use main `token_id`)
-- `aggregation_method`: `"average"` | `"median"` | `"weighted_avg"`
-- `min_sources_num`: Minimum successful sources required
-- `max_price_deviation_percent`: Max allowed % deviation
-
-## Response Format
-
-```json
-{
-  "tokens": [
-    {
-      "token": "bitcoin",
-      "data": {
-        "price": 110836.0,
-        "timestamp": 1729447200,
-        "sources": ["coingecko", "coinmarketcap"]
-      },
-      "message": null
-    },
-    {
-      "token": "ethereum",
-      "data": null,
-      "message": "Not enough sources responded (1/2). Errors: coingecko: HTTP 429, coinmarketcap: HTTP 401"
-    }
+  "timestamp": "1706889600000000000",
+  "recency_duration_sec": 300,
+  "prices": [
+    { "asset_id": "wrap.near", "price": { "multiplier": "500000000", "decimals": 8 } },
+    { "asset_id": "aurora", "price": { "multiplier": "320000000000", "decimals": 8 } }
   ]
 }
 ```
 
-## Examples
+**Price conversion:** `multiplier / 10^decimals = USD`
+- `500000000 / 10^8 = $5.00` (NEAR)
+- `320000000000 / 10^8 = $3200.00` (ETH)
 
-All examples use `wasi-test-runner` (see [Quick Start](#quick-start) for setup).
-
-### Single Token (Bitcoin)
+### Request Fresh Prices
 
 ```bash
-cd ../wasi-test-runner
-
-./target/release/wasi-test \
-  --wasm ../oracle-ark/oracle-ark.wasm \
-  --input-file ../oracle-ark/example_request.json \
-  --max-instructions 50000000000
+near call price-oracle.near request_price_data '{
+  "asset_ids": ["wrap.near"]
+}' --accountId your.near --deposit 0.02 --gas 200000000000000
 ```
 
-### Multiple Tokens (Bitcoin + Ethereum + NEAR)
+---
 
-```bash
-cd ../wasi-test-runner
+## Integration Guide #1: Price Oracle Contract
 
-./target/release/wasi-test \
-  --wasm ../oracle-ark/oracle-ark.wasm \
-  --input-file ../oracle-ark/example_multi.json \
-  --max-instructions 50000000000 \
-  --verbose
+For DeFi protocols integrating price feeds.
 
-# Expected output (3 tokens):
-# ✅ Execution successful!
-# Output: {
-#   "tokens": [
-#     {"token":"bitcoin","data":{"price":110804.0,"timestamp":1760959996,"sources":["coingecko"]},"message":null},
-#     {"token":"ethereum","data":{"price":3456.78,"timestamp":1760959997,"sources":["coingecko"]},"message":null},
-#     {"token":"near","data":{"price":8.92,"timestamp":1760959998,"sources":["coingecko"]},"message":null}
-#   ]
-# }
+### View Methods (free)
+
+| Method | Arguments | Description |
+|--------|-----------|-------------|
+| `get_price_data` | `asset_ids?: string[]` | Get cached prices. Returns `null` for stale assets. |
+| `can_subsidize_outlayer_calls` | — | Returns `true` if contract pays for OutLayer calls |
+| `get_oracle_price_data` | `account_id, asset_ids?, recency_duration_sec?` | Get prices from specific oracle |
+| `get_asset` | `asset_id` | Get asset configuration |
+| `get_assets` | `from_index?, limit?` | List all registered assets |
+
+### Call Methods
+
+| Method | Deposit | Description |
+|--------|---------|-------------|
+| `request_price_data` | 0.01+ NEAR | Get prices directly (returns `PriceData`) |
+| `oracle_call` | 0.01+ NEAR | Get prices with callback to your contract |
+| `request_custom_data` | 0.01+ NEAR | Fetch arbitrary external data |
+| `custom_call` | 0.01+ NEAR | Custom data with callback |
+
+> **Subsidized Mode:** If contract has >20 NEAR and subsidy is enabled, calls are free.
+
+### Data Types
+
+```rust
+/// Price format: multiplier / 10^decimals = USD
+struct Price {
+    multiplier: u128,  // e.g., 500000000 for $5.00
+    decimals: u8,      // usually 8
+}
+
+/// Response from get_price_data / oracle_call
+struct PriceData {
+    timestamp: u64,              // nanoseconds
+    recency_duration_sec: u32,   // max age for "fresh" prices
+    prices: Vec<AssetOptionalPrice>,
+}
+
+struct AssetOptionalPrice {
+    asset_id: String,
+    price: Option<Price>,  // None if stale/unavailable
+}
 ```
 
-### Custom Request (Commodities)
+### Callback Interface
+
+Your contract must implement `oracle_on_call` to receive prices from `oracle_call`:
+
+```rust
+use near_sdk::{near_bindgen, AccountId};
+
+#[near_bindgen]
+impl Contract {
+    pub fn oracle_on_call(
+        &mut self,
+        sender_id: AccountId,
+        data: PriceData,
+        msg: String,
+    ) {
+        // Verify caller is the oracle
+        assert_eq!(
+            env::predecessor_account_id(),
+            "price-oracle.near".parse::<AccountId>().unwrap(),
+            "Only oracle can call"
+        );
+
+        // Process prices
+        for asset_price in data.prices {
+            if let Some(price) = asset_price.price {
+                let price_usd = price.multiplier as f64
+                    / 10f64.powi(price.decimals as i32);
+                // Use price_usd...
+            }
+        }
+    }
+}
+```
+
+For `custom_call`, implement `on_custom_data`:
+
+```rust
+pub fn on_custom_data(
+    &mut self,
+    sender_id: AccountId,
+    data: Vec<CustomDataResult>,
+    msg: String,
+)
+```
+
+### Rust Integration Example
+
+```rust
+use near_sdk::{ext_contract, AccountId, Gas, NearToken, Promise};
+
+#[ext_contract(ext_oracle)]
+pub trait Oracle {
+    fn oracle_call(
+        &mut self,
+        receiver_id: AccountId,
+        asset_ids: Option<Vec<String>>,
+        msg: String,
+        resource_limits: Option<serde_json::Value>,
+    ) -> Promise;
+}
+
+impl Contract {
+    pub fn get_prices_with_callback(&self) -> Promise {
+        ext_oracle::ext("price-oracle.near".parse().unwrap())
+            .with_attached_deposit(NearToken::from_millinear(20)) // 0.02 NEAR
+            .with_static_gas(Gas::from_tgas(150))
+            .oracle_call(
+                env::current_account_id(),
+                Some(vec!["wrap.near".to_string(), "aurora".to_string()]),
+                "swap".to_string(),
+                None,
+            )
+    }
+}
+```
+
+### JavaScript Integration Example
+
+```typescript
+import { connect, Contract, keyStores } from 'near-api-js';
+
+const oracle = new Contract(account, 'price-oracle.near', {
+  viewMethods: ['get_price_data', 'can_subsidize_outlayer_calls'],
+  changeMethods: ['request_price_data', 'oracle_call'],
+});
+
+// View cached prices (free)
+const cached = await oracle.get_price_data({
+  asset_ids: ['wrap.near', 'aurora'],
+});
+
+// Request fresh prices
+const fresh = await oracle.request_price_data(
+  { asset_ids: ['wrap.near'] },
+  '200000000000000', // 200 TGas
+  '20000000000000000000000', // 0.02 NEAR
+);
+
+// Convert price
+const nearPrice = cached.prices[0].price;
+const priceUsd = Number(nearPrice.multiplier) / Math.pow(10, nearPrice.decimals);
+console.log(`NEAR = $${priceUsd}`);
+```
+
+### EMA Prices
+
+Request Exponential Moving Average by appending `#<period_sec>` to asset ID:
 
 ```bash
-cd ../wasi-test-runner
+near view price-oracle.near get_price_data '{"asset_ids": ["wrap.near#3600"]}'
+```
 
-./target/release/wasi-test \
-  --wasm ../oracle-ark/oracle-ark.wasm \
-  --input '{
-    "tokens": [
-      {
-        "token_id": "gold",
-        "sources": [{"name": "twelvedata", "token_id": "XAU/USD"}],
-        "aggregation_method": "average",
-        "min_sources_num": 1
-      },
-      {
-        "token_id": "oil_brent",
-        "sources": [{"name": "twelvedata", "token_id": "BRENT/USD"}],
-        "aggregation_method": "average",
-        "min_sources_num": 1
+This returns 1-hour EMA for NEAR.
+
+---
+
+## Integration Guide #2: Pyth-Compatible Wrapper
+
+**Drop-in replacement** for `pyth-oracle.near`. Switch oracles with zero code changes.
+
+### Contract
+
+| Network | Address |
+|---------|---------|
+| Testnet | `price-oracle-pyth.testnet` |
+| Mainnet | `price-oracle-pyth.near` |
+
+### View Methods
+
+| Method | Description |
+|--------|-------------|
+| `get_price(price_identifier)` | Get price with staleness check |
+| `get_price_unsafe(price_identifier)` | Get price without staleness check |
+| `get_price_no_older_than(price_id, age)` | Get price with custom max age |
+| `get_ema_price(price_id)` | Get EMA price |
+| `list_prices(price_ids)` | Batch get multiple prices |
+| `price_feed_exists(price_identifier)` | Check if feed is configured |
+| `get_stale_threshold()` | Get staleness threshold in seconds |
+
+### Pyth Price Format
+
+```rust
+struct Price {
+    price: i64,        // Price value
+    conf: u64,         // Confidence interval (always 0 for Oracle-Ark)
+    expo: i32,         // Exponent (usually -8)
+    publish_time: i64, // Unix timestamp (seconds)
+}
+// actual_price = price * 10^expo
+// Example: { price: 500000000, expo: -8 } = $5.00
+```
+
+### Pre-configured Price Feed Mappings
+
+| Asset | Contract ID | Pyth Price ID |
+|-------|-------------|---------------|
+| NEAR | `wrap.near` | `c415de8d2efa7db216527dff4b60e8f3a5311c740dadb233e13e12547e226750` |
+| ETH | `aurora` | `ff61491a931112ddf1bd8147cd1b641375f79f5825126d665480874634fd0ace` |
+| BTC | `nbtc.bridge.near` | `e62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43` |
+| USDT | `usdt.tether-token.near` | `2b89b9dc8fdf9f34709a5b106b472f0f39bb6ca9ce04b0fd7f2e971688e2e53b` |
+| USDC | `17208628f84f5d6ad...` | `eaa020c61cc479712813461ce153894a96a6c00b21ed0cfc2798d1f9a9e9c94a` |
+
+### Migration from Pyth
+
+```rust
+// Before (Pyth)
+const ORACLE: &str = "pyth-oracle.near";
+
+// After (Oracle-Ark) — no other changes needed!
+const ORACLE: &str = "price-oracle-pyth.near";
+```
+
+### Example
+
+```bash
+# Get NEAR price using Pyth API
+near view price-oracle-pyth.near get_price '{
+  "price_identifier": "c415de8d2efa7db216527dff4b60e8f3a5311c740dadb233e13e12547e226750"
+}'
+```
+
+---
+
+## Integration Guide #3: Building Your Own WASI Worker
+
+Create custom data feeds using OutLayer's WASI infrastructure.
+
+### Prerequisites
+
+1. Read [WASI_TUTORIAL.md](../WASI_TUTORIAL.md)
+2. Familiarity with Rust and WASI
+
+### Project Structure
+
+```
+your-oracle/
+├── src/
+│   └── main.rs          # WASI entry point
+├── Cargo.toml
+├── build.sh
+└── tokens.json          # Token configuration
+```
+
+### Custom Data Sources
+
+Fetch from any HTTP API using `CustomSourceConfig`:
+
+```rust
+pub struct CustomSourceConfig {
+    pub url: String,           // HTTP endpoint
+    pub json_path: String,     // Dot notation: "data.price"
+    pub value_type: String,    // "number", "string", "boolean"
+    pub method: String,        // "GET" or "POST"
+    pub headers: Vec<(String, String)>,
+}
+```
+
+Example — fetch game price from Steam:
+
+```json
+{
+  "custom_data_request": [{
+    "id": "elden_ring_price",
+    "token_id": "",
+    "source": {
+      "custom": {
+        "url": "https://store.steampowered.com/api/appdetails?appids=1245620",
+        "json_path": "1245620.data.price_overview.final",
+        "value_type": "number"
       }
-    ],
-    "max_price_deviation_percent": 10.0
-  }' \
-  --max-instructions 50000000000
-```
-
-## Configuration
-
-### API Keys (Optional)
-
-Set via encrypted secrets:
-
-```json
-{
-  "COINGECKO_API_KEY": "your-key-here",
-  "COINMARKETCAP_API_KEY": "your-key-here",
-  "TWELVEDATA_API_KEY": "your-key-here"
+    }
+  }]
 }
 ```
 
-**Note**: CoinGecko and TwelveData work without API keys (free tier). CoinMarketCap requires API key.
+### Deployment
 
-## Architecture
+```bash
+# Build WASI binary
+./build.sh
 
-```
-main.rs
-  ├─ Read JSON from stdin
-  ├─ Validate (max 10 tokens)
-  ├─ Get API keys from env vars
-  └─ For each token:
-      ├─ Fetch from each source (sources.rs)
-      ├─ Check min_sources_num
-      ├─ Validate price deviation
-      ├─ Aggregate prices (aggregation.rs)
-      └─ Build response
-
-sources.rs
-  ├─ fetch_coingecko() - HTTP GET to CoinGecko API
-  ├─ fetch_coinmarketcap() - HTTP GET with API key header
-  └─ fetch_twelvedata() - HTTP GET to TwelveData API
-
-aggregation.rs
-  ├─ calculate_average() - Arithmetic mean
-  ├─ calculate_median() - Median (protection from outliers)
-  └─ calculate_price_deviation() - Validate consistency
+# Deploy via OutLayer dashboard or CLI
+# See: https://outlayer.fastnear.com/dashboard
 ```
 
-## Error Handling
+---
 
-### Not Enough Sources
+## Supported Tokens
 
-```json
-{
-  "token": "bitcoin",
-  "data": null,
-  "message": "Not enough sources responded (1/2). Errors: coingecko: HTTP 429, coinmarketcap: HTTP 401"
-}
+13 tokens pre-configured with multiple sources:
+
+| Token | Contract ID | Sources |
+|-------|-------------|---------|
+| **NEAR** | `wrap.near` | CoinGecko, Binance, Binance US, Pyth, Huobi, KuCoin, Gate.io, Crypto.com |
+| **ETH** | `aurora` | CoinGecko, Binance, Binance US, Pyth, Huobi, KuCoin, Gate.io, Crypto.com |
+| **BTC** | `nbtc.bridge.near` | CoinGecko, Binance, Binance US, Pyth, Huobi, KuCoin, Gate.io, Crypto.com |
+| **USDT** | `usdt.tether-token.near` | CoinGecko, Pyth |
+| **USDC** | `17208628f84f5d6ad...` | CoinGecko, Binance, Pyth, Crypto.com, KuCoin |
+| **WBTC** | `2260fac5e5...factory.bridge.near` | CoinGecko, Binance, Pyth, Huobi, Crypto.com, KuCoin, Gate.io |
+| **DAI** | `6b175474e8...factory.bridge.near` | CoinGecko, Binance, Binance US, Pyth, Huobi, Gate.io |
+| **AURORA** | `aaaaaa20d9...factory.bridge.near` | CoinGecko, Pyth, Crypto.com, Huobi, KuCoin, Gate.io |
+| **WOO** | `4691937a75...factory.bridge.near` | CoinGecko, Binance, Pyth, Huobi, Crypto.com, KuCoin, Gate.io |
+| **FRAX** | `853d955ace...factory.bridge.near` | CoinGecko, Pyth |
+| **SOL** | `22.contract.portalbridge.near` | CoinGecko, Binance, Binance US, Pyth, Huobi, KuCoin, Gate.io, Crypto.com |
+| **ZEC** | `zec.omft.near` | CoinGecko, Binance, Binance US, Pyth, Huobi, KuCoin, Gate.io |
+| **RHEA** | `token.rhealab.near` | Binance Alpha, Pyth |
+
+---
+
+## Price Sources
+
+9 exchanges + custom sources:
+
+| Source | Type | API Key | Example Tokens |
+|--------|------|---------|----------------|
+| **CoinGecko** | REST | Optional | `bitcoin`, `ethereum`, `near` |
+| **Binance** | REST | No | `BTCUSDT`, `ETHUSDT` |
+| **Binance US** | REST | No | `BTCUSD`, `ETHUSD` |
+| **Pyth Network** | REST | No | Price feed IDs |
+| **Huobi** | REST | No | `btcusdt`, `ethusdt` |
+| **KuCoin** | REST | No | `BTC-USDT`, `ETH-USDT` |
+| **Gate.io** | REST | No | `btc_usdt`, `eth_usdt` |
+| **Crypto.com** | REST | No | `BTC_USDT`, `ETH_USDT` |
+| **Binance Alpha** | REST | No | BSC contract addresses |
+| **Custom** | Any HTTP | Configurable | Any URL + JSON path |
+
+**Aggregation:** Median (default) — resistant to outliers and manipulation.
+
+---
+
+## Deposit Summary
+
+| Method | Fresh Cache | Stale (OutLayer) | Subsidized |
+|--------|-------------|------------------|------------|
+| `get_price_data` | Free | N/A | N/A |
+| `get_oracle_price_data` | Free | N/A | N/A |
+| `request_price_data` | Free | 0.01+ NEAR | Free |
+| `oracle_call` | 1 yoctoNEAR | 0.01+ NEAR | Free |
+| `request_custom_data` | N/A | 0.01+ NEAR | Free |
+| `custom_call` | N/A | 0.01+ NEAR | Free |
+
+**Subsidized mode:** When enabled and contract balance > 20 NEAR, users don't pay.
+
+Check status:
+```bash
+near view price-oracle.near can_subsidize_outlayer_calls
 ```
 
-### Price Deviation Too High
+---
 
-```json
-{
-  "token": "bitcoin",
-  "data": null,
-  "message": "Price deviation too high: 12.50% (max: 5.00%)"
-}
+## Project Structure
+
+```
+oracle-ark/
+├── src/                        # WASI worker source
+├── contract/                   # Main price oracle contract
+├── wrapper-contract/           # Simple wrapper example
+├── pyth-compatible-wrapper/    # Pyth API drop-in replacement
+├── scheduler/                  # Off-chain price update automation
+├── sources/                    # Shared price sources library
+├── oracle-prices-ui/           # Dashboard, playground, docs
+├── tokens.json                 # Token configuration
+└── README.md                   # This file
 ```
 
-### Partial Success
+---
 
-```json
-{
-  "token": "bitcoin",
-  "data": {
-    "price": 110836.0,
-    "timestamp": 1729447200,
-    "sources": ["coingecko"]
-  },
-  "message": "coinmarketcap: HTTP 429"
-}
-```
+## Links
 
-## Limitations
+- **Dashboard & Playground & Docs:** https://price-oracle.outlayer.ai/
+- **GitHub:** https://github.com/zavodil/oracle-ark
+- **OutLayer Platform:** https://outlayer.fastnear.com/dashboard
+- **Integration Guide:** [integration.md](integration.md)
+- **SDK Reference:** [sdk.md](sdk.md)
+- **WASI Tutorial:** [WASI_TUTORIAL.md](../WASI_TUTORIAL.md)
 
-- Max 10 tokens per request
-- Sequential processing (not parallel)
-- 10 second timeout per source
-- Output must be ≤900 bytes (NEAR limit)
-
-## Technical Details
-
-- **Target**: `wasm32-wasip2` (WASI Preview 2)
-- **HTTP Client**: `wasi-http-client` 0.2
-- **Binary Size**: ~500-800KB (depends on optimizations)
-- **Dependencies**: serde, serde_json, wasi-http-client
+---
 
 ## License
 

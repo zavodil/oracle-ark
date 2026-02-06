@@ -62,9 +62,7 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
           ],
         });
 
-        const walletModal = setupModal(walletSelector, {
-          contractId: '',
-        });
+        const walletModal = setupModal(walletSelector, {});
 
         const state = walletSelector.store.getState();
         const accounts = state.accounts;

@@ -38,7 +38,7 @@ const securityPoints = [
   },
   {
     title: 'TEE Attestation',
-    description: 'Workers verify via DCAP attestation. RTMR3 whitelist ensures only approved binaries can run.',
+    description: 'Workers verify via DCAP attestation. 5-measurement whitelist (MRTD + RTMR0-3) ensures only approved binaries can run.',
   },
   {
     title: 'Cryptographic Proof',

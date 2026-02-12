@@ -1,5 +1,7 @@
 # TEE-Secured Price Oracle
 
+> **[Full documentation](https://outlayer.fastnear.com/docs/examples#oracle-ark)** on the OutLayer dashboard.
+
 **On-Demand Oracle with Sustainable Economics**
 
 Based on [OutLayer](https://outlayer.fastnear.com) — verifiable off-chain computation for NEAR Protocol.

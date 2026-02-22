@@ -17,6 +17,13 @@ WASM_BASE64=$(base64 -i target/near/price_oracle.wasm)
 near call price-oracle.near upgrade --base64 "$WASM_BASE64" --accountId owner.price-oracle.near --gas 300000000000000 --networkId mainnet
 ```
 
+### Configure contract to use OutLayer
+
+```bash
+near call price-oracle.near configure_outlayer '{
+  "outlayer_contract_id": "outlayer.near",
+  "code_source": "{\"Project\": {\"project_id\": \"price-oracle.near/price-oracle\"}}"}' --accountId owner.price-oracle.near --networkId mainnet --depositYocto 1
+```
 
 ### Configure assets
 

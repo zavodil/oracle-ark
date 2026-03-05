@@ -6,10 +6,11 @@ import Link from 'next/link';
 const sections = [
   { id: 'overview', name: 'Overview' },
   { id: 'quick-start', name: 'Quick Start' },
+  { id: 'governance', name: 'Governance & Security' },
+  { id: 'pyth-native', name: 'Pyth Interface' },
   { id: 'direct-outlayer', name: 'Direct OutLayer Integration' },
   { id: 'price-oracle', name: 'Price Oracle Contract' },
   { id: 'wrapper-example', name: 'Integration Example' },
-  { id: 'pyth-wrapper', name: 'Pyth-Compatible Wrapper' },
   { id: 'custom-data', name: 'Custom Data Sources' },
   { id: 'code-examples', name: 'Code Examples' },
   { id: 'deposits', name: 'Deposit Requirements' },
@@ -80,10 +81,12 @@ export default function DocsPage() {
               <div className="card mb-8">
                 <h3 className="text-lg font-semibold text-white mb-4">Key Features</h3>
                 <ul className="space-y-2 text-dark-300">
-                  <li>✓ Prices always &quot;warm&quot; in TEE — instant delivery to contracts</li>
+                  <li>✓ Proactive price pushing — prices always fresh in contract (30-60s updates)</li>
                   <li>✓ Zero trust — all data processed inside Intel TDX enclave</li>
-                  <li>✓ 9+ price sources with median aggregation</li>
-                  <li>✓ Pyth-compatible API for easy migration</li>
+                  <li>✓ DAO-governed — all configuration managed through council proposals</li>
+                  <li>✓ TEE-only signing — only keys generated inside TEE can push prices</li>
+                  <li>✓ 10 price sources with median aggregation</li>
+                  <li>✓ Native Pyth-compatible API — migrate from pyth-oracle.near by changing one address</li>
                   <li>✓ Custom data fetching from any HTTP API</li>
                   <li>✓ Subsidized mode — free calls when contract has funds</li>
                 </ul>
@@ -91,11 +94,11 @@ export default function DocsPage() {
 
               <div className="grid md:grid-cols-3 gap-4">
                 <div className="card text-center">
-                  <div className="text-3xl font-bold text-primary mb-2">13</div>
+                  <div className="text-3xl font-bold text-primary mb-2">21</div>
                   <div className="text-dark-400 text-sm">Supported Tokens</div>
                 </div>
                 <div className="card text-center">
-                  <div className="text-3xl font-bold text-primary mb-2">9+</div>
+                  <div className="text-3xl font-bold text-primary mb-2">10</div>
                   <div className="text-dark-400 text-sm">Price Sources</div>
                 </div>
                 <div className="card text-center">
@@ -138,17 +141,16 @@ export default function DocsPage() {
                 </code>
               </pre>
 
-              <div className="card border-yellow-500/30 bg-yellow-500/5 mb-6">
+              <div className="card border-blue-500/30 bg-blue-500/5 mb-6">
                 <div className="flex items-start gap-3">
-                  <div className="text-yellow-400 text-xl">⚠️</div>
+                  <div className="text-blue-400 text-xl">i</div>
                   <div>
                     <h3 className="text-lg font-semibold text-white mb-2">About View Methods (get_price_data)</h3>
                     <p className="text-dark-400 text-sm mb-3">
-                      <code className="text-yellow-400">get_price_data</code> is a free view method, but it <strong className="text-white">only returns data if someone recently paid for an update</strong>.
-                      Due to the on-demand nature, the cache is usually empty — prices are fetched when needed for specific operations (liquidations, borrowing, swaps), not stored permanently.
+                      <code className="text-primary">get_price_data</code> is a free view method. Prices are <strong className="text-white">proactively pushed</strong> to the contract every 30-60 seconds by TEE workers, so data is always fresh.
                     </p>
                     <p className="text-dark-400 text-sm">
-                      <strong className="text-white">This is by design:</strong> Unlike traditional oracles with a central price feed, this oracle delivers prices directly to your contract. Any contract can integrate without intermediaries — no shared &quot;price feed contract&quot; required.
+                      You can also call <code className="text-primary">request_price_data</code> to trigger an immediate on-demand update from TEE if needed.
                     </p>
                   </div>
                 </div>
@@ -168,6 +170,180 @@ export default function DocsPage() {
   ]
 }
 // Price conversion: 500000000 / 10^8 = $5.00`}
+                </code>
+              </pre>
+            </section>
+
+            {/* Governance & Security */}
+            <section id="governance" className="mb-16">
+              <h2 className="text-2xl font-bold text-white mb-6">Governance & Security</h2>
+
+              <div className="card border-green-500/30 bg-green-500/5 mb-6">
+                <div className="flex items-start gap-3">
+                  <div className="text-green-400 text-xl">✓</div>
+                  <div>
+                    <h3 className="text-lg font-semibold text-white mb-2">All Changes Go Through DAO</h3>
+                    <p className="text-dark-400 text-sm">
+                      Every contract state mutation — adding assets, configuring exchanges, registering push signers, upgrading the contract — requires a DAO council proposal with &gt;50% approval. No single key can modify the oracle.
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              <h3 className="text-lg font-semibold text-white mb-4">TEE-Only Price Pushing</h3>
+              <p className="text-dark-300 mb-4">
+                Prices are pushed to the contract by <strong className="text-white">implicit accounts derived from TEE-generated keys</strong>.
+                The private key is created inside the TEE (Intel TDX) and never leaves it — no human, including the project owner, ever sees it.
+              </p>
+              <div className="card bg-dark-900 mb-6">
+                <pre className="text-sm text-dark-300 overflow-x-auto">
+{`How PROTECTED_ keys work:
+
+1. Project owner creates a secret (e.g., PROTECTED_KEY_RHEA) in OutLayer dashboard
+2. Private key generated INSIDE TEE — never exposed to anyone
+3. DAO proposal registers the derived implicit account as trusted oracle
+4. Only this account can call report_prices for assigned assets
+5. WASI code inside TEE signs transactions with the key
+
+Result: No human holds the signing key. Only verified TEE code can push prices.`}
+                </pre>
+              </div>
+
+              <h3 className="text-lg font-semibold text-white mb-4">DAO Proposal Actions</h3>
+              <div className="overflow-x-auto mb-6">
+                <table className="w-full text-left text-sm">
+                  <thead>
+                    <tr className="border-b border-dark-700">
+                      <th className="py-3 px-4 text-dark-300">Action</th>
+                      <th className="py-3 px-4 text-dark-300">Description</th>
+                    </tr>
+                  </thead>
+                  <tbody className="text-dark-400">
+                    <tr className="border-b border-dark-800">
+                      <td className="py-3 px-4"><code className="text-primary">AddAsset / RemoveAsset</code></td>
+                      <td className="py-3 px-4">Manage tracked assets</td>
+                    </tr>
+                    <tr className="border-b border-dark-800">
+                      <td className="py-3 px-4"><code className="text-primary">SetAssetExchangeConfig</code></td>
+                      <td className="py-3 px-4">Configure exchange tickers, Pyth/Chainlink feeds per asset</td>
+                    </tr>
+                    <tr className="border-b border-dark-800">
+                      <td className="py-3 px-4"><code className="text-primary">RegisterPushSigner</code></td>
+                      <td className="py-3 px-4">Register TEE-derived account as trusted price pusher</td>
+                    </tr>
+                    <tr className="border-b border-dark-800">
+                      <td className="py-3 px-4"><code className="text-primary">ConfigureOutlayer</code></td>
+                      <td className="py-3 px-4">Set OutLayer integration parameters</td>
+                    </tr>
+                    <tr className="border-b border-dark-800">
+                      <td className="py-3 px-4"><code className="text-primary">ProposeUpgrade / ExecuteUpgrade</code></td>
+                      <td className="py-3 px-4">Two-phase contract upgrade via DAO vote</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+
+              <h3 className="text-lg font-semibold text-white mb-4">Self-Service for Projects</h3>
+              <p className="text-dark-300 mb-4">
+                Third-party projects can operate their own push signers:
+              </p>
+              <ol className="list-decimal list-inside text-dark-300 space-y-2 mb-4">
+                <li>Create a TEE secret (<code className="text-primary">PROTECTED_KEY_*</code>) in OutLayer dashboard</li>
+                <li>DAO proposal to register the key for specific assets</li>
+                <li>Fund the derived implicit account with NEAR</li>
+                <li>Scheduler pushes prices autonomously from TEE</li>
+              </ol>
+            </section>
+
+            {/* Native Pyth Interface */}
+            <section id="pyth-native" className="mb-16">
+              <h2 className="text-2xl font-bold text-white mb-6">Native Pyth Interface</h2>
+              <p className="text-dark-300 mb-6">
+                <code className="text-primary">price-oracle.near</code> implements Pyth-compatible view methods natively.
+                DeFi contracts using <code>pyth-oracle.near</code> can migrate by changing one contract address — no code changes needed.
+              </p>
+
+              <div className="card border-green-500/30 bg-green-500/5 mb-6">
+                <div className="flex items-start gap-3">
+                  <div className="text-green-400 text-xl">✓</div>
+                  <div>
+                    <h3 className="text-lg font-semibold text-white mb-2">No refresh_prices Needed</h3>
+                    <p className="text-dark-400 text-sm">
+                      Unlike the separate Pyth wrapper contract, the native interface reads directly from contract state which is
+                      proactively updated every 30-60 seconds by the scheduler. View methods always return fresh data.
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              <h3 className="text-lg font-semibold text-white mb-4">View Methods (free, always fresh)</h3>
+              <div className="overflow-x-auto mb-8">
+                <table className="w-full text-left text-sm">
+                  <thead>
+                    <tr className="border-b border-dark-700">
+                      <th className="py-3 px-4 text-dark-300">Method</th>
+                      <th className="py-3 px-4 text-dark-300">Description</th>
+                    </tr>
+                  </thead>
+                  <tbody className="text-dark-400">
+                    <tr className="border-b border-dark-800">
+                      <td className="py-3 px-4"><code className="text-primary">get_price(price_identifier)</code></td>
+                      <td className="py-3 px-4">Latest price with staleness check</td>
+                    </tr>
+                    <tr className="border-b border-dark-800">
+                      <td className="py-3 px-4"><code className="text-primary">get_price_unsafe(price_identifier)</code></td>
+                      <td className="py-3 px-4">Latest price without staleness check</td>
+                    </tr>
+                    <tr className="border-b border-dark-800">
+                      <td className="py-3 px-4"><code className="text-primary">get_price_no_older_than(price_id, age)</code></td>
+                      <td className="py-3 px-4">Price only if published within <code>age</code> seconds</td>
+                    </tr>
+                    <tr className="border-b border-dark-800">
+                      <td className="py-3 px-4"><code className="text-primary">get_ema_price(price_id)</code></td>
+                      <td className="py-3 px-4">EMA price with staleness check</td>
+                    </tr>
+                    <tr className="border-b border-dark-800">
+                      <td className="py-3 px-4"><code className="text-primary">get_ema_price_unsafe(price_id)</code></td>
+                      <td className="py-3 px-4">EMA price without staleness check</td>
+                    </tr>
+                    <tr className="border-b border-dark-800">
+                      <td className="py-3 px-4"><code className="text-primary">list_prices(price_ids)</code></td>
+                      <td className="py-3 px-4">Batch: multiple feeds at once</td>
+                    </tr>
+                    <tr className="border-b border-dark-800">
+                      <td className="py-3 px-4"><code className="text-primary">price_feed_exists(price_identifier)</code></td>
+                      <td className="py-3 px-4">Check if feed is configured</td>
+                    </tr>
+                    <tr className="border-b border-dark-800">
+                      <td className="py-3 px-4"><code className="text-primary">get_update_fee_estimate(data)</code></td>
+                      <td className="py-3 px-4">Returns 1 yoctoNEAR (no update needed)</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+
+              <h3 className="text-lg font-semibold text-white mb-4">Migration from Pyth</h3>
+              <pre className="bg-dark-900 rounded-lg p-4 overflow-x-auto mb-6">
+                <code className="text-blue-400">
+{`// Before (Pyth)
+const ORACLE: &str = "pyth-oracle.near";
+
+// After (Oracle-Ark) — no other changes needed!
+const ORACLE: &str = "price-oracle.near";`}
+                </code>
+              </pre>
+
+              <h3 className="text-lg font-semibold text-white mb-4">Response Format</h3>
+              <pre className="bg-dark-900 rounded-lg p-4 overflow-x-auto">
+                <code className="text-blue-400">
+{`// PythPrice format (same as pyth-oracle.near)
+{
+  "price": 525000000,      // price * 10^|expo|
+  "conf": 0,               // confidence (always 0 for Oracle-Ark)
+  "expo": -8,              // exponent: actual_price = price * 10^expo
+  "publish_time": 1706900000  // unix timestamp (seconds)
+}
+// Example: price=525000000, expo=-8 → $5.25`}
                 </code>
               </pre>
             </section>
@@ -324,15 +500,13 @@ or go direct for full customization.`}
                 <div className="flex items-start gap-3">
                   <div className="text-blue-400 text-xl">i</div>
                   <div>
-                    <h3 className="text-lg font-semibold text-white mb-2">This contract is optional</h3>
+                    <h3 className="text-lg font-semibold text-white mb-2">Always-fresh prices</h3>
                     <p className="text-dark-400 text-sm mb-3">
-                      <code className="text-primary">price-oracle.near</code> is provided as an example of caching data from TEE.
-                      You can integrate with OutLayer directly from your own contract (see section above).
+                      <code className="text-primary">price-oracle.near</code> receives proactive price updates every 30-60 seconds from TEE workers.
+                      View methods like <code className="text-primary">get_price_data</code> always return fresh data — no paid call needed.
                     </p>
                     <p className="text-dark-400 text-sm">
-                      <strong className="text-white">Note on caching:</strong> Caching only helps when there are many simultaneous requests for the same data.
-                      In practice, data is fetched from TEE specifically for each user&apos;s request and immediately used in their operation.
-                      The cache is usually empty or stale — this is by design for an on-demand oracle.
+                      You can also integrate with OutLayer directly from your own contract (see Direct OutLayer Integration section above).
                     </p>
                   </div>
                 </div>
@@ -350,12 +524,12 @@ or go direct for full customization.`}
               </p>
 
               <h3 className="text-lg font-semibold text-white mb-4">View Methods (free)</h3>
-              <div className="card border-yellow-500/30 bg-yellow-500/5 mb-4">
+              <div className="card border-blue-500/30 bg-blue-500/5 mb-4">
                 <div className="flex items-start gap-3">
-                  <div className="text-yellow-400 text-lg">⚠️</div>
+                  <div className="text-blue-400 text-lg">i</div>
                   <p className="text-dark-400 text-sm">
-                    <code className="text-yellow-400">get_price_data</code> only returns prices if someone recently called <code className="text-primary">request_price_data</code> or <code className="text-primary">oracle_call</code>.
-                    Due to the on-demand design, the cache is usually empty — use call methods to fetch fresh data.
+                    Prices are proactively pushed every 30-60 seconds. <code className="text-primary">get_price_data</code> always returns fresh data.
+                    You can also call <code className="text-primary">request_price_data</code> for an immediate on-demand update.
                   </p>
                 </div>
               </div>
@@ -569,132 +743,27 @@ pub fn oracle_on_call(
               </div>
             </section>
 
-            {/* Pyth Wrapper */}
+            {/* Legacy Pyth Wrapper — redirect to native */}
             <section id="pyth-wrapper" className="mb-16">
-              <h2 className="text-2xl font-bold text-white mb-6">Pyth-Compatible Wrapper</h2>
-              <p className="text-dark-300 mb-6">
-                Drop-in replacement for <code>pyth-oracle.near</code>. Switch oracles with zero code changes.
-              </p>
-              <p className="text-dark-300 mb-6">
-                Contract address: <code className="text-primary">price-oracle-pyth.near</code>
-              </p>
-
-              <div className="card border-yellow-500/30 bg-yellow-500/5 mb-6">
+              <h2 className="text-2xl font-bold text-white mb-6">Legacy Pyth Wrapper</h2>
+              <div className="card border-blue-500/30 bg-blue-500/5 mb-6">
                 <div className="flex items-start gap-3">
-                  <div className="text-yellow-400 text-xl">⚠️</div>
+                  <div className="text-blue-400 text-xl">i</div>
                   <div>
-                    <h3 className="text-lg font-semibold text-white mb-2">Important: Call refresh_prices First!</h3>
                     <p className="text-dark-400 text-sm mb-3">
-                      View methods (<code className="text-yellow-400">get_price</code>, <code className="text-yellow-400">list_prices</code>) only return data <strong className="text-white">after someone calls <code className="text-primary">refresh_prices</code></strong>.
-                      Without this, all view calls return <code className="text-red-400">null</code>.
+                      <strong className="text-white">Pyth-compatible methods are now built into <code className="text-primary">price-oracle.near</code> directly.</strong>{' '}
+                      The separate <code className="text-dark-300">price-oracle-pyth.near</code> wrapper is no longer needed.
                     </p>
                     <p className="text-dark-400 text-sm">
-                      <strong className="text-white">Typical flow:</strong> Call <code className="text-primary">refresh_prices</code> (0.02 NEAR) → then use view methods (free).
-                      On mainnet, prices may already be warm from other users calling refresh.
+                      See the{' '}
+                      <button onClick={() => scrollToSection('pyth-native')} className="text-primary hover:underline">
+                        Native Pyth Interface
+                      </button>{' '}
+                      section for migration instructions. Simply change your contract address to <code className="text-primary">price-oracle.near</code> — all Pyth view methods work natively, with always-fresh prices (no <code className="text-dark-300">refresh_prices</code> call needed).
                     </p>
                   </div>
                 </div>
               </div>
-
-              <h3 className="text-lg font-semibold text-white mb-4">Call Method (required before view methods)</h3>
-              <div className="overflow-x-auto mb-8">
-                <table className="w-full text-left text-sm">
-                  <thead>
-                    <tr className="border-b border-dark-700">
-                      <th className="py-3 px-4 text-dark-300">Method</th>
-                      <th className="py-3 px-4 text-dark-300">Deposit</th>
-                      <th className="py-3 px-4 text-dark-300">Description</th>
-                    </tr>
-                  </thead>
-                  <tbody className="text-dark-400">
-                    <tr className="border-b border-dark-800">
-                      <td className="py-3 px-4"><code className="text-primary">refresh_prices</code></td>
-                      <td className="py-3 px-4 text-yellow-400">0.02 NEAR</td>
-                      <td className="py-3 px-4">Fetch fresh prices from TEE and update cache. Required before view methods return data.</td>
-                    </tr>
-                  </tbody>
-                </table>
-              </div>
-
-              <pre className="bg-dark-900 rounded-lg p-4 overflow-x-auto mb-8">
-                <code className="text-green-400">
-{`# Step 1: Refresh prices (required once)
-near call price-oracle-pyth.near refresh_prices '{}' \\
-  --accountId your.near --deposit 0.02 --gas 300000000000000
-
-# Step 2: Now view methods work (free)
-near view price-oracle-pyth.near get_price '{
-  "price_identifier": "c415de8d2efa7db216527dff4b60e8f3a5311c740dadb233e13e12547e226750"
-}'`}
-                </code>
-              </pre>
-
-              <h3 className="text-lg font-semibold text-white mb-4">View Methods (free, but require refresh_prices first)</h3>
-              <div className="overflow-x-auto mb-8">
-                <table className="w-full text-left text-sm">
-                  <thead>
-                    <tr className="border-b border-dark-700">
-                      <th className="py-3 px-4 text-dark-300">Method</th>
-                      <th className="py-3 px-4 text-dark-300">Description</th>
-                    </tr>
-                  </thead>
-                  <tbody className="text-dark-400">
-                    <tr className="border-b border-dark-800">
-                      <td className="py-3 px-4"><code className="text-primary">get_price(price_identifier)</code></td>
-                      <td className="py-3 px-4">Get price with staleness check (returns null if cache empty)</td>
-                    </tr>
-                    <tr className="border-b border-dark-800">
-                      <td className="py-3 px-4"><code className="text-primary">get_price_unsafe(price_identifier)</code></td>
-                      <td className="py-3 px-4">Get price without staleness check (returns null if cache empty)</td>
-                    </tr>
-                    <tr className="border-b border-dark-800">
-                      <td className="py-3 px-4"><code className="text-primary">list_prices(price_ids)</code></td>
-                      <td className="py-3 px-4">Batch get multiple prices (returns null values if cache empty)</td>
-                    </tr>
-                    <tr className="border-b border-dark-800">
-                      <td className="py-3 px-4"><code className="text-primary">price_feed_exists(price_identifier)</code></td>
-                      <td className="py-3 px-4">Check if feed is configured</td>
-                    </tr>
-                  </tbody>
-                </table>
-              </div>
-
-              <h3 className="text-lg font-semibold text-white mb-4">Price Feed IDs</h3>
-              <div className="overflow-x-auto mb-8">
-                <table className="w-full text-left text-sm">
-                  <thead>
-                    <tr className="border-b border-dark-700">
-                      <th className="py-3 px-4 text-dark-300">Asset</th>
-                      <th className="py-3 px-4 text-dark-300">Pyth Price ID</th>
-                    </tr>
-                  </thead>
-                  <tbody className="text-dark-400">
-                    <tr className="border-b border-dark-800">
-                      <td className="py-3 px-4">NEAR</td>
-                      <td className="py-3 px-4"><code className="text-xs">c415de8d2efa7db216527dff4b60e8f3a5311c740dadb233e13e12547e226750</code></td>
-                    </tr>
-                    <tr className="border-b border-dark-800">
-                      <td className="py-3 px-4">ETH</td>
-                      <td className="py-3 px-4"><code className="text-xs">ff61491a931112ddf1bd8147cd1b641375f79f5825126d665480874634fd0ace</code></td>
-                    </tr>
-                    <tr className="border-b border-dark-800">
-                      <td className="py-3 px-4">BTC</td>
-                      <td className="py-3 px-4"><code className="text-xs">e62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43</code></td>
-                    </tr>
-                  </tbody>
-                </table>
-              </div>
-
-              <h3 className="text-lg font-semibold text-white mb-4">Migration from Pyth</h3>
-              <pre className="bg-dark-900 rounded-lg p-4 overflow-x-auto">
-                <code className="text-blue-400">
-{`// Before (Pyth)
-const ORACLE: &str = "pyth-oracle.near";
-
-// After (Oracle-Ark) — no other changes needed!
-const ORACLE: &str = "price-oracle-pyth.near";`}
-                </code>
-              </pre>
             </section>
 
             {/* Custom Data */}

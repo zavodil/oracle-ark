@@ -8,6 +8,7 @@ import {
   formatContractId,
   isStablecoin,
   getSourceCount,
+  sortTokens,
   DEFAULT_TOKENS,
 } from '@/lib/tokens';
 
@@ -253,7 +254,7 @@ export default function PricesPage() {
   useEffect(() => {
     fetchTokenConfigs()
       .then((config) => {
-        const tokens = Object.keys(config);
+        const tokens = sortTokens(Object.keys(config), config);
         if (tokens.length > 0) {
           setTokensConfig(config);
           setAllTokens(tokens);

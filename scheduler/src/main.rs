@@ -176,7 +176,7 @@ async fn main() -> Result<()> {
 
     let config = Config::from_env()?;
     let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(30))
+        .timeout(Duration::from_secs(120))
         .build()?;
 
     info!("Starting oracle scheduler");
@@ -220,6 +220,9 @@ async fn main() -> Result<()> {
     // Track consecutive failures for alerting
     let mut consecutive_failures: u32 = 0;
     const ALERT_THRESHOLD: u32 = 3; // Alert after 3 consecutive failures
+
+    // Throttle repeated telegram alerts (10 min cooldown)
+    let mut alert_throttle = telegram::AlertThrottle::new();
 
     // Main loop - poll every 10 seconds
     let poll_interval = Duration::from_secs(10);
@@ -325,22 +328,20 @@ async fn main() -> Result<()> {
                             Ok(balance) => {
                                 if balance < config.oracle_min_balance_near {
                                     any_low = true;
-                                    if !contract_update_paused {
-                                        warn!(
-                                            "Oracle signer {} balance {:.4} NEAR < min {:.4}",
+                                    warn!(
+                                        "Oracle signer {} balance {:.4} NEAR < min {:.4}",
+                                        signer_account, balance, config.oracle_min_balance_near
+                                    );
+                                    alert_throttle.send(
+                                        &client,
+                                        config.telegram_bot_token.as_deref(),
+                                        config.telegram_chat_id.as_deref(),
+                                        "Oracle Balance Low",
+                                        &format!(
+                                            "Account: {}\nBalance: {:.4} NEAR\nMinimum: {:.4} NEAR\n\nContract updates paused. Fund the account to resume.",
                                             signer_account, balance, config.oracle_min_balance_near
-                                        );
-                                        telegram::send_alert(
-                                            &client,
-                                            config.telegram_bot_token.as_deref(),
-                                            config.telegram_chat_id.as_deref(),
-                                            "Oracle Balance Low",
-                                            &format!(
-                                                "Account: {}\nBalance: {:.4} NEAR\nMinimum: {:.4} NEAR\n\nContract updates paused. Fund the account to resume.",
-                                                signer_account, balance, config.oracle_min_balance_near
-                                            ),
-                                        ).await;
-                                    }
+                                        ),
+                                    ).await;
                                 }
                             }
                             Err(e) => {
@@ -358,7 +359,7 @@ async fn main() -> Result<()> {
             }
         }
 
-        match poll_and_update(&client, &config, &mut last_update, oracle_keys_cache.as_ref(), contract_update_paused, exchange_configs).await {
+        match poll_and_update(&client, &config, &mut last_update, oracle_keys_cache.as_ref(), contract_update_paused, exchange_configs, &mut alert_throttle).await {
             Ok(_) => {
                 consecutive_failures = 0;
             }
@@ -367,8 +368,8 @@ async fn main() -> Result<()> {
                 consecutive_failures += 1;
 
                 // Send Telegram alert after threshold failures
-                if consecutive_failures == ALERT_THRESHOLD {
-                    telegram::send_alert(
+                if consecutive_failures >= ALERT_THRESHOLD {
+                    alert_throttle.send(
                         &client,
                         config.telegram_bot_token.as_deref(),
                         config.telegram_chat_id.as_deref(),
@@ -607,6 +608,7 @@ async fn poll_and_update(
     oracle_keys: Option<&HashMap<String, String>>,
     contract_update_paused: bool,
     exchange_configs: &HashMap<String, ExchangeConfig>,
+    alert_throttle: &mut telegram::AlertThrottle,
 ) -> Result<()> {
     // Reset Chainlink disabled state each cycle (scheduler is long-lived)
     oracle_ark_sources::CHAINLINK_DISABLED.store(false, std::sync::atomic::Ordering::Relaxed);
@@ -647,8 +649,8 @@ async fn poll_and_update(
     if current_prices.is_empty() {
         warn!("No current prices fetched from any source");
 
-        // Alert if we couldn't get any prices
-        telegram::send_alert(
+        // Alert if we couldn't get any prices (throttled)
+        alert_throttle.send(
             client,
             config.telegram_bot_token.as_deref(),
             config.telegram_chat_id.as_deref(),
@@ -726,8 +728,8 @@ async fn poll_and_update(
             Err(e) => {
                 error!("WASI update failed: {}", e);
 
-                // Send Telegram alert for WASI failures
-                telegram::send_alert(
+                // Send Telegram alert for WASI failures (throttled)
+                alert_throttle.send(
                     client,
                     config.telegram_bot_token.as_deref(),
                     config.telegram_chat_id.as_deref(),

@@ -10,6 +10,7 @@ export interface TokenInfo {
   kucoin?: string;
   gate?: string;
   pyth?: string;
+  chainlink?: string;
   binance_alpha?: string;
 }
 
@@ -106,6 +107,7 @@ export function getSourceCount(contractId: string, config: TokensConfig): number
   if (token.kucoin) count++;
   if (token.gate) count++;
   if (token.pyth) count++;
+  if (token.chainlink) count++;
   if (token.binance_alpha) count++;
   return count;
 }
@@ -114,6 +116,27 @@ export function getSourceCount(contractId: string, config: TokensConfig): number
 export function formatContractId(contractId: string): string {
   if (contractId.length <= 25) return contractId;
   return `${contractId.slice(0, 12)}...${contractId.slice(-10)}`;
+}
+
+// Pinned assets at the top (in order)
+const PINNED_ASSETS = ['wrap.near', 'nbtc.bridge.near', 'aurora'];
+
+// Sort tokens: pinned first, then by source count desc, stablecoins last
+export function sortTokens(tokens: string[], config: TokensConfig): string[] {
+  return [...tokens].sort((a, b) => {
+    const aPin = PINNED_ASSETS.indexOf(a);
+    const bPin = PINNED_ASSETS.indexOf(b);
+    // Pinned assets come first in their defined order
+    if (aPin !== -1 && bPin !== -1) return aPin - bPin;
+    if (aPin !== -1) return -1;
+    if (bPin !== -1) return 1;
+    // Stablecoins go last
+    const aStable = isStablecoin(a, config);
+    const bStable = isStablecoin(b, config);
+    if (aStable !== bStable) return aStable ? 1 : -1;
+    // Sort by source count descending
+    return getSourceCount(b, config) - getSourceCount(a, config);
+  });
 }
 
 // Default tokens to display (used as loading skeleton)

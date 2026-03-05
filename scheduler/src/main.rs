@@ -233,6 +233,9 @@ async fn main() -> Result<()> {
     let mut oracle_keys_fetched_at: Option<Instant> = None;
     const ORACLE_KEYS_CACHE_TTL: Duration = Duration::from_secs(3600); // 1 hour
 
+    // Auto-discovered signer accounts (from contract, refreshed with oracle keys)
+    let mut signer_accounts_cache: Vec<String> = Vec::new();
+
     // Balance check for oracle signer (every 5 minutes)
     let mut contract_update_paused = false;
     let mut balance_check_at: Option<Instant> = None;
@@ -260,6 +263,20 @@ async fn main() -> Result<()> {
                                 for (asset, key) in &keys {
                                     debug!("  {} -> {}", asset, key);
                                 }
+
+                                // Auto-discover signer accounts if not manually configured
+                                if config.oracle_signer_account.is_none() {
+                                    let accounts = discover_signer_accounts(
+                                        &client, &config.near_rpc_url, contract_id, &keys,
+                                    ).await;
+                                    if !accounts.is_empty() {
+                                        info!("Discovered {} signer accounts from contract", accounts.len());
+                                        for acc in &accounts {
+                                            debug!("  signer: {}", acc);
+                                        }
+                                    }
+                                    signer_accounts_cache = accounts;
+                                }
                             }
                             oracle_keys_cache = if keys.is_empty() { None } else { Some(keys) };
                             oracle_keys_fetched_at = Some(Instant::now());
@@ -275,39 +292,53 @@ async fn main() -> Result<()> {
 
         // Check oracle signer balance periodically
         if config.update_contract_enabled {
-            if let Some(ref signer_account) = config.oracle_signer_account {
+            // Use manually configured account or auto-discovered accounts
+            let accounts_to_check: Vec<&str> = if let Some(ref account) = config.oracle_signer_account {
+                vec![account.as_str()]
+            } else {
+                signer_accounts_cache.iter().map(|s| s.as_str()).collect()
+            };
+
+            if !accounts_to_check.is_empty() {
                 let should_check = balance_check_at
                     .map(|t| t.elapsed() >= BALANCE_CHECK_INTERVAL)
                     .unwrap_or(true);
                 if should_check {
-                    match check_near_balance(&client, &config.near_rpc_url, signer_account).await {
-                        Ok(balance) => {
-                            let was_paused = contract_update_paused;
-                            contract_update_paused = balance < config.oracle_min_balance_near;
-                            if contract_update_paused && !was_paused {
-                                warn!(
-                                    "Oracle signer {} balance {:.4} NEAR < min {:.4}, pausing contract updates",
-                                    signer_account, balance, config.oracle_min_balance_near
-                                );
-                                telegram::send_alert(
-                                    &client,
-                                    config.telegram_bot_token.as_deref(),
-                                    config.telegram_chat_id.as_deref(),
-                                    "Oracle Balance Low",
-                                    &format!(
-                                        "Account: {}\nBalance: {:.4} NEAR\nMinimum: {:.4} NEAR\n\nContract updates paused. Fund the account to resume.",
-                                        signer_account, balance, config.oracle_min_balance_near
-                                    ),
-                                ).await;
-                            } else if !contract_update_paused && was_paused {
-                                info!("Oracle signer {} balance {:.4} NEAR restored, resuming contract updates", signer_account, balance);
+                    let mut any_low = false;
+                    for signer_account in &accounts_to_check {
+                        match check_near_balance(&client, &config.near_rpc_url, signer_account).await {
+                            Ok(balance) => {
+                                if balance < config.oracle_min_balance_near {
+                                    any_low = true;
+                                    if !contract_update_paused {
+                                        warn!(
+                                            "Oracle signer {} balance {:.4} NEAR < min {:.4}",
+                                            signer_account, balance, config.oracle_min_balance_near
+                                        );
+                                        telegram::send_alert(
+                                            &client,
+                                            config.telegram_bot_token.as_deref(),
+                                            config.telegram_chat_id.as_deref(),
+                                            "Oracle Balance Low",
+                                            &format!(
+                                                "Account: {}\nBalance: {:.4} NEAR\nMinimum: {:.4} NEAR\n\nContract updates paused. Fund the account to resume.",
+                                                signer_account, balance, config.oracle_min_balance_near
+                                            ),
+                                        ).await;
+                                    }
+                                }
                             }
-                            balance_check_at = Some(Instant::now());
-                        }
-                        Err(e) => {
-                            warn!("Failed to check oracle signer balance: {}", e);
+                            Err(e) => {
+                                warn!("Failed to check oracle signer balance for {}: {}", signer_account, e);
+                            }
                         }
                     }
+                    let was_paused = contract_update_paused;
+                    contract_update_paused = any_low;
+                    if !contract_update_paused && was_paused {
+                        info!("Oracle signer balances restored, resuming contract updates");
+                    }
+                    balance_check_at = Some(Instant::now());
                 }
             }
         }
@@ -425,6 +456,87 @@ async fn read_asset_oracle_keys(
         serde_json::from_slice(&result_bytes).context("Failed to parse get_asset_oracle_keys response")?;
 
     Ok(pairs.into_iter().collect())
+}
+
+/// Read push signer accounts for a given asset from the oracle contract.
+/// Returns Vec of account IDs (64-char hex implicit accounts).
+async fn read_push_signer_accounts(
+    client: &reqwest::Client,
+    rpc_url: &str,
+    contract_id: &str,
+    asset_id: &str,
+) -> Result<Vec<String>> {
+    let args = serde_json::json!({ "asset_id": asset_id });
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": "oracle-scheduler",
+        "method": "query",
+        "params": {
+            "request_type": "call_function",
+            "finality": "optimistic",
+            "account_id": contract_id,
+            "method_name": "get_push_signer_accounts",
+            "args_base64": BASE64.encode(args.to_string().as_bytes())
+        }
+    });
+
+    let resp = client
+        .post(rpc_url)
+        .json(&body)
+        .send()
+        .await
+        .context("RPC request failed")?;
+
+    let rpc_resp: serde_json::Value = resp.json().await.context("RPC response parse failed")?;
+
+    let result_bytes = rpc_resp["result"]["result"]
+        .as_array()
+        .context("Missing result.result array in RPC response")?
+        .iter()
+        .map(|v| v.as_u64().unwrap_or(0) as u8)
+        .collect::<Vec<u8>>();
+
+    // Response is Option<Vec<AccountId>> — null means no push signer restriction
+    let accounts: Option<Vec<String>> =
+        serde_json::from_slice(&result_bytes).context("Failed to parse get_push_signer_accounts response")?;
+
+    Ok(accounts.unwrap_or_default())
+}
+
+/// Discover all unique signer accounts from oracle key mappings.
+/// Groups by unique key name, picks one asset per key, calls get_push_signer_accounts.
+async fn discover_signer_accounts(
+    client: &reqwest::Client,
+    rpc_url: &str,
+    contract_id: &str,
+    oracle_keys: &HashMap<String, String>,
+) -> Vec<String> {
+    // Collect one asset per unique key name
+    let mut key_to_asset: HashMap<&str, &str> = HashMap::new();
+    for (asset_id, key_name) in oracle_keys {
+        key_to_asset.entry(key_name.as_str()).or_insert(asset_id.as_str());
+    }
+
+    let mut all_accounts: Vec<String> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    for (key_name, asset_id) in &key_to_asset {
+        match read_push_signer_accounts(client, rpc_url, contract_id, asset_id).await {
+            Ok(accounts) => {
+                for account in accounts {
+                    if seen.insert(account.clone()) {
+                        debug!("Discovered signer account {} (key: {})", account, key_name);
+                        all_accounts.push(account);
+                    }
+                }
+            }
+            Err(e) => {
+                warn!("Failed to read push signer accounts for {} (key {}): {}", asset_id, key_name, e);
+            }
+        }
+    }
+
+    all_accounts
 }
 
 /// Check NEAR balance of an account via RPC. Returns balance in NEAR.

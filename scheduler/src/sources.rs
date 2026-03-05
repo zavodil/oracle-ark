@@ -1,11 +1,10 @@
 //! Price sources for scheduler
 //!
-//! Uses shared oracle-ark-sources crate for parsing logic,
-//! but gets token mappings from TokensConfig (tokens.json).
+//! Uses shared oracle-ark-sources crate for parsing logic.
+//! Exchange configs loaded from public storage (synced from contract via DAO).
 
-use crate::token_config::TokensConfig;
 use anyhow::Result;
-use oracle_ark_sources::{parsers, SourcePrice};
+use oracle_ark_sources::{parsers, ExchangeConfig, SourcePrice};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{debug, info};
 
@@ -20,10 +19,10 @@ fn current_timestamp() -> u64 {
 pub async fn fetch_price(
     client: &reqwest::Client,
     token: &str,
-    tokens_config: &TokensConfig,
+    config: &ExchangeConfig,
     api_key: Option<&str>,
 ) -> Result<f64> {
-    let prices = fetch_all_sources(client, token, tokens_config, api_key).await;
+    let prices = fetch_all_sources(client, config, api_key).await;
 
     if prices.is_empty() {
         anyhow::bail!("No sources available for {}", token);
@@ -49,74 +48,64 @@ pub async fn fetch_price(
     Ok(median)
 }
 
-/// Fetch price from all available sources for a token
+/// Fetch price from all available sources for a token using its ExchangeConfig
 pub async fn fetch_all_sources(
     client: &reqwest::Client,
-    token: &str,
-    tokens_config: &TokensConfig,
+    config: &ExchangeConfig,
     api_key: Option<&str>,
 ) -> Vec<SourcePrice> {
     let mut prices = Vec::new();
 
-    // CoinGecko
-    if let Some(cg_id) = tokens_config.coingecko_id(token) {
+    if let Some(ref cg_id) = config.coingecko {
         if let Ok(p) = fetch_coingecko(client, cg_id, api_key).await {
             prices.push(p);
         }
     }
 
-    // Binance
-    if let Some(symbol) = tokens_config.binance_symbol(token) {
+    if let Some(ref symbol) = config.binance {
         if let Ok(p) = fetch_binance(client, symbol).await {
             prices.push(p);
         }
     }
 
-    // Binance US
-    if let Some(symbol) = tokens_config.binance_us_symbol(token) {
+    if let Some(ref symbol) = config.binance_us {
         if let Ok(p) = fetch_binance_us(client, symbol).await {
             prices.push(p);
         }
     }
 
-    // Binance Alpha (for tokens like Rhea)
-    if let Some(address) = tokens_config.binance_alpha_address(token) {
+    if let Some(ref address) = config.binance_alpha {
         match fetch_binance_alpha(client, address).await {
             Ok(p) => prices.push(p),
-            Err(e) => debug!("binance_alpha {} failed: {}", token, e),
+            Err(e) => debug!("binance_alpha failed: {}", e),
         }
     }
 
-    // Pyth
-    if let Some(price_id) = tokens_config.pyth_id(token) {
-        if let Ok(p) = fetch_pyth(client, price_id).await {
+    if let Some(pyth_id) = config.pyth_id() {
+        if let Ok(p) = fetch_pyth(client, pyth_id).await {
             prices.push(p);
         }
     }
 
-    // Huobi
-    if let Some(symbol) = tokens_config.huobi_symbol(token) {
+    if let Some(ref symbol) = config.huobi {
         if let Ok(p) = fetch_huobi(client, symbol).await {
             prices.push(p);
         }
     }
 
-    // KuCoin
-    if let Some(symbol) = tokens_config.kucoin_symbol(token) {
+    if let Some(ref symbol) = config.kucoin {
         if let Ok(p) = fetch_kucoin(client, symbol).await {
             prices.push(p);
         }
     }
 
-    // Gate.io
-    if let Some(pair) = tokens_config.gate_pair(token) {
+    if let Some(ref pair) = config.gate {
         if let Ok(p) = fetch_gate(client, pair).await {
             prices.push(p);
         }
     }
 
-    // Crypto.com
-    if let Some(instrument) = tokens_config.cryptocom_instrument(token) {
+    if let Some(ref instrument) = config.cryptocom {
         if let Ok(p) = fetch_cryptocom(client, instrument).await {
             prices.push(p);
         }

@@ -60,6 +60,7 @@ enum StorageKey {
     Proposals,
     AssetOracleKeys,
     PendingUpgradeCodes,
+    AssetExchangeConfigs,
 }
 
 impl IntoStorageKey for StorageKey {
@@ -408,6 +409,11 @@ pub struct Contract {
     /// WASM code blobs waiting to be deployed via DAO upgrade proposals.
     /// Keyed by SHA-256 hex hash. Stores code + uploader + deposit for refund.
     pub pending_upgrade_codes: UnorderedMap<String, upgrade::PendingUpgrade>,
+
+    /// Per-asset exchange config stored as opaque JSON strings.
+    /// Managed via DAO proposals, synced to WASI public storage.
+    /// Contract does not parse these — WASI/scheduler parse at runtime.
+    pub asset_exchange_configs: UnorderedMap<AssetId, String>,
 }
 
 #[derive(Serialize, Deserialize, schemars::JsonSchema)]
@@ -450,6 +456,7 @@ impl Contract {
             paused: false,
             asset_oracle_keys: UnorderedMap::new(StorageKey::AssetOracleKeys),
             pending_upgrade_codes: UnorderedMap::new(StorageKey::PendingUpgradeCodes),
+            asset_exchange_configs: UnorderedMap::new(StorageKey::AssetExchangeConfigs),
         }
     }
 
@@ -1202,6 +1209,68 @@ impl Contract {
                 }
             }
         }
+    }
+
+    /// Sync all exchange configs to WASI public storage via OutLayer.
+    /// Caller pays for OutLayer execution. Anyone can call (idempotent).
+    #[payable]
+    pub fn sync_asset_configs(&mut self) {
+        let attached = env::attached_deposit();
+
+        let outlayer_contract_id = self
+            .outlayer_contract_id
+            .clone()
+            .expect("OutLayer not configured");
+        let code_source_str = self
+            .outlayer_code_source
+            .clone()
+            .expect("OutLayer code source not configured");
+
+        // Check deposit: subsidized or caller-paid
+        let contract_balance = env::account_balance().as_yoctonear();
+        let can_subsidize =
+            self.subsidize_outlayer_calls && contract_balance > MIN_BALANCE_FOR_SUBSIDY;
+
+        let (outlayer_deposit, payer_account_id) = if can_subsidize {
+            (
+                NearToken::from_yoctonear(SUBSIDIZED_OUTLAYER_DEPOSIT),
+                None,
+            )
+        } else {
+            assert!(
+                attached.as_yoctonear() >= MIN_OUTLAYER_DEPOSIT,
+                "Requires at least 0.01 NEAR for OutLayer execution"
+            );
+            (attached, Some(env::predecessor_account_id()))
+        };
+
+        // Pass raw config strings to WASI — contract doesn't parse JSON.
+        // WASI will deserialize and validate on its side.
+        let configs_map: std::collections::HashMap<String, String> =
+            self.asset_exchange_configs.iter().collect();
+
+        let input_data = serde_json::json!({
+            "command": "sync_asset_configs",
+            "configs": configs_map
+        })
+        .to_string();
+
+        let execution_source: ExecutionSource =
+            serde_json::from_str(&code_source_str).expect("Invalid code source JSON");
+        let secrets_ref = self.build_secrets_ref();
+
+        ext_outlayer::ext(outlayer_contract_id)
+            .with_attached_deposit(outlayer_deposit)
+            .with_unused_gas_weight(1)
+            .request_execution(
+                execution_source,
+                Some(ResourceLimits::default()),
+                Some(input_data),
+                secrets_ref,
+                Some(ResponseFormat::Text),
+                payer_account_id,
+                None,
+            );
     }
 
     /// Build secrets_ref JSON for OutLayer if both profile and account_id are configured

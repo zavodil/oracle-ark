@@ -26,6 +26,32 @@ pub struct OldContract {
     pub secrets_account_id: Option<AccountId>,
 }
 
+/// State after migrate_state2 (has asset_oracle_keys, but no asset_exchange_configs).
+#[derive(BorshDeserialize)]
+#[borsh(crate = "near_sdk::borsh")]
+pub struct OldContractV3 {
+    pub oracles: UnorderedMap<AccountId, VOracle>,
+    pub assets: UnorderedMap<AssetId, VAsset>,
+    pub recency_duration_sec: DurationSec,
+    pub owner_id: AccountId,
+    pub near_claim_amount: u128,
+    pub outlayer_contract_id: Option<AccountId>,
+    pub outlayer_code_source: Option<String>,
+    pub subsidize_outlayer_calls: bool,
+    pub secrets_profile: Option<String>,
+    pub secrets_account_id: Option<AccountId>,
+    pub pyth_price_id_to_asset: UnorderedMap<String, String>,
+    pub pyth_asset_to_price_id: UnorderedMap<String, String>,
+    pub pyth_stale_threshold: u64,
+    pub council_members: Vec<AccountId>,
+    pub council_threshold: u32,
+    pub proposals: UnorderedMap<u64, council::VProposal>,
+    pub next_proposal_id: u64,
+    pub paused: bool,
+    pub asset_oracle_keys: UnorderedMap<AssetId, String>,
+    pub pending_upgrade_codes: UnorderedMap<String, PendingUpgrade>,
+}
+
 /// State after migrate_state (has Pyth/Council/Pause, but no asset_oracle_keys).
 #[derive(BorshDeserialize)]
 #[borsh(crate = "near_sdk::borsh")]
@@ -78,6 +104,7 @@ impl Contract {
             paused: false,
             asset_oracle_keys: UnorderedMap::new(StorageKey::AssetOracleKeys),
             pending_upgrade_codes: UnorderedMap::new(StorageKey::PendingUpgradeCodes),
+            asset_exchange_configs: UnorderedMap::new(StorageKey::AssetExchangeConfigs),
         }
     }
 
@@ -107,6 +134,37 @@ impl Contract {
             paused: old.paused,
             asset_oracle_keys: UnorderedMap::new(StorageKey::AssetOracleKeys),
             pending_upgrade_codes: UnorderedMap::new(StorageKey::PendingUpgradeCodes),
+            asset_exchange_configs: UnorderedMap::new(StorageKey::AssetExchangeConfigs),
+        }
+    }
+
+    /// Migration from post-asset_oracle_keys state: adds asset_exchange_configs.
+    #[private]
+    #[init(ignore_state)]
+    pub fn migrate_state3() -> Self {
+        let old: OldContractV3 = env::state_read().unwrap();
+        Self {
+            oracles: old.oracles,
+            assets: old.assets,
+            recency_duration_sec: old.recency_duration_sec,
+            owner_id: old.owner_id,
+            near_claim_amount: old.near_claim_amount,
+            outlayer_contract_id: old.outlayer_contract_id,
+            outlayer_code_source: old.outlayer_code_source,
+            subsidize_outlayer_calls: old.subsidize_outlayer_calls,
+            secrets_profile: old.secrets_profile,
+            secrets_account_id: old.secrets_account_id,
+            pyth_price_id_to_asset: old.pyth_price_id_to_asset,
+            pyth_asset_to_price_id: old.pyth_asset_to_price_id,
+            pyth_stale_threshold: old.pyth_stale_threshold,
+            council_members: old.council_members,
+            council_threshold: old.council_threshold,
+            proposals: old.proposals,
+            next_proposal_id: old.next_proposal_id,
+            paused: old.paused,
+            asset_oracle_keys: old.asset_oracle_keys,
+            pending_upgrade_codes: old.pending_upgrade_codes,
+            asset_exchange_configs: UnorderedMap::new(StorageKey::AssetExchangeConfigs),
         }
     }
 

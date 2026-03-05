@@ -1,7 +1,15 @@
 'use client';
 
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { ALL_TOKENS, getTokenName, formatContractId, isStablecoin, getSourceCount } from '@/lib/tokens';
+import {
+  TokensConfig,
+  fetchTokenConfigs,
+  getTokenName,
+  formatContractId,
+  isStablecoin,
+  getSourceCount,
+  DEFAULT_TOKENS,
+} from '@/lib/tokens';
 
 const API_URL = 'https://api.outlayer.fastnear.com';
 const PROJECT_UUID = 'p0000000000000003';
@@ -58,11 +66,19 @@ function isFresh(ts: number | undefined): boolean {
   return getAgeSeconds(ts) <= RECENCY_DURATION_SEC;
 }
 
-function PriceCard({ assetId, result }: { assetId: string; result: PriceResult }) {
+function PriceCard({
+  assetId,
+  result,
+  tokensConfig,
+}: {
+  assetId: string;
+  result: PriceResult;
+  tokensConfig: TokensConfig;
+}) {
   const { data, error } = result;
   const fresh = data && isFresh(data.timestamp);
-  const stablecoin = isStablecoin(assetId);
-  const sourceCount = getSourceCount(assetId);
+  const stablecoin = isStablecoin(assetId, tokensConfig);
+  const sourceCount = getSourceCount(assetId, tokensConfig);
 
   return (
     <div
@@ -168,15 +184,20 @@ function PriceCard({ assetId, result }: { assetId: string; result: PriceResult }
 }
 
 export default function PricesPage() {
+  const [tokensConfig, setTokensConfig] = useState<TokensConfig>({});
+  const [allTokens, setAllTokens] = useState<string[]>(DEFAULT_TOKENS);
   const [prices, setPrices] = useState<Record<string, PriceResult>>({});
   const [loading, setLoading] = useState(true);
   const [countdown, setCountdown] = useState(REFRESH_INTERVAL_SEC);
   const [freshCount, setFreshCount] = useState(0);
   const countdownRef = useRef<NodeJS.Timeout | null>(null);
   const lastFetchTimeRef = useRef<number>(Date.now());
+  const tokensConfigRef = useRef<TokensConfig>({});
+  const allTokensRef = useRef<string[]>(DEFAULT_TOKENS);
 
   const fetchPrices = useCallback(async () => {
-    const keys = ALL_TOKENS.map(assetId => `price:${assetId}`);
+    const tokens = allTokensRef.current;
+    const keys = tokens.map(assetId => `price:${assetId}`);
 
     try {
       const response = await fetch(`${API_URL}/public/storage/batch`, {
@@ -195,7 +216,7 @@ export default function PricesPage() {
       const batchResult = await response.json();
       const results: Record<string, PriceResult> = {};
 
-      ALL_TOKENS.forEach((assetId, i) => {
+      tokens.forEach((assetId, i) => {
         const key = keys[i];
         const item = batchResult.results[key];
         if (item && item.exists && item.value) {
@@ -218,7 +239,7 @@ export default function PricesPage() {
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : 'Unknown error';
       const results: Record<string, PriceResult> = {};
-      ALL_TOKENS.forEach(assetId => {
+      tokens.forEach(assetId => {
         results[assetId] = { error: errorMsg };
       });
       setPrices(results);
@@ -227,6 +248,25 @@ export default function PricesPage() {
       setLoading(false);
     }
   }, []);
+
+  // Load token configs from public storage on mount
+  useEffect(() => {
+    fetchTokenConfigs()
+      .then((config) => {
+        const tokens = Object.keys(config);
+        if (tokens.length > 0) {
+          setTokensConfig(config);
+          setAllTokens(tokens);
+          tokensConfigRef.current = config;
+          allTokensRef.current = tokens;
+          // Re-fetch prices immediately with the full token list
+          fetchPrices();
+        }
+      })
+      .catch((err) => {
+        console.error('Failed to load token configs:', err);
+      });
+  }, [fetchPrices]);
 
   // Initial fetch and auto-refresh
   useEffect(() => {
@@ -269,7 +309,7 @@ export default function PricesPage() {
           <div>
             <h1 className="text-3xl font-bold text-white mb-2">Live Prices</h1>
             <p className="text-dark-400">
-              {loading ? 'Loading prices...' : `${freshCount}/${ALL_TOKENS.length} fresh prices`}
+              {loading ? 'Loading prices...' : `${freshCount}/${allTokens.length} fresh prices`}
             </p>
           </div>
           <div className="flex items-center gap-4">
@@ -320,7 +360,7 @@ export default function PricesPage() {
         {/* Price grid */}
         {loading ? (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-            {ALL_TOKENS.map(assetId => (
+            {allTokens.map(assetId => (
               <div key={assetId} className="card animate-pulse">
                 <div className="flex items-center gap-3 mb-4">
                   <div className="w-10 h-10 bg-dark-700 rounded-full"></div>
@@ -339,11 +379,12 @@ export default function PricesPage() {
           </div>
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-            {ALL_TOKENS.map(assetId => (
+            {allTokens.map(assetId => (
               <PriceCard
                 key={assetId}
                 assetId={assetId}
                 result={prices[assetId] || { error: 'Not loaded' }}
+                tokensConfig={tokensConfig}
               />
             ))}
           </div>

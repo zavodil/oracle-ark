@@ -30,6 +30,16 @@ impl Contract {
     pub fn get_asset_oracle_keys(&self) -> Vec<(AssetId, String)> {
         self.asset_oracle_keys.iter().collect()
     }
+
+    /// Get all asset exchange configs (opaque JSON strings).
+    pub fn get_asset_exchange_configs(&self) -> Vec<(AssetId, String)> {
+        self.asset_exchange_configs.iter().collect()
+    }
+
+    /// Get exchange config for a single asset.
+    pub fn get_asset_exchange_config(&self, asset_id: AssetId) -> Option<String> {
+        self.asset_exchange_configs.get(&asset_id)
+    }
 }
 
 impl Contract {

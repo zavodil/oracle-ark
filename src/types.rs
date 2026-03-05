@@ -131,6 +131,14 @@ pub enum OracleCommand {
         #[serde(default = "default_oracle_key_name")]
         key_name: String,
     },
+
+    /// Sync asset exchange configs to public storage.
+    /// Called by the oracle contract after DAO config updates.
+    /// WASI stores the full config map in public storage key "config:assets".
+    SyncAssetConfigs {
+        /// Full config map: asset_id -> exchange config JSON string
+        configs: std::collections::HashMap<String, String>,
+    },
 }
 
 /// External price source for non-whitelisted tokens
@@ -270,6 +278,15 @@ pub struct CustomDataResult {
     pub value: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timestamp: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Response for sync_asset_configs command
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SyncResponse {
+    pub success: bool,
+    pub count: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }

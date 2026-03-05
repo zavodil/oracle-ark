@@ -1,6 +1,6 @@
-// Token metadata - loaded from tokens.json
+// Token metadata - loaded from public storage (config:assets)
 export interface TokenInfo {
-  decimals: number;
+  decimals?: number;
   stablecoin?: boolean;
   coingecko?: string;
   binance?: string;
@@ -17,129 +17,32 @@ export interface TokensConfig {
   [contractId: string]: TokenInfo;
 }
 
-// Full token metadata from tokens.json
-export const TOKENS: TokensConfig = {
-  'wrap.near': {
-    decimals: 24,
-    coingecko: 'near',
-    binance: 'NEARUSDT',
-    binance_us: 'NEARUSD',
-    huobi: 'nearusdt',
-    cryptocom: 'NEAR_USDT',
-    kucoin: 'NEAR-USDT',
-    gate: 'near_usdt',
-    pyth: '0xc415de8d2efa7db216527dff4b60e8f3a5311c740dadb233e13e12547e226750',
-  },
-  'aurora': {
-    decimals: 18,
-    coingecko: 'ethereum',
-    binance: 'ETHUSDT',
-    binance_us: 'ETHUSD',
-    huobi: 'ethusdt',
-    cryptocom: 'ETH_USDT',
-    kucoin: 'ETH-USDT',
-    gate: 'eth_usdt',
-    pyth: '0xff61491a931112ddf1bd8147cd1b641375f79f5825126d665480874634fd0ace',
-  },
-  'usdt.tether-token.near': {
-    decimals: 6,
-    stablecoin: true,
-    coingecko: 'tether',
-    pyth: '0x2b89b9dc8fdf9f34709a5b106b472f0f39bb6ca9ce04b0fd7f2e971688e2e53b',
-  },
-  '17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1': {
-    decimals: 6,
-    stablecoin: true,
-    coingecko: 'usd-coin',
-    cryptocom: 'USDC_USDT',
-    kucoin: 'USDC-USDT',
-    binance: 'USDCUSDT',
-    pyth: '0xeaa020c61cc479712813461ce153894a96a6c00b21ed0cfc2798d1f9a9e9c94a',
-  },
-  'nbtc.bridge.near': {
-    decimals: 8,
-    coingecko: 'bitcoin',
-    binance: 'BTCUSDT',
-    binance_us: 'BTCUSD',
-    huobi: 'btcusdt',
-    cryptocom: 'BTC_USDT',
-    kucoin: 'BTC-USDT',
-    gate: 'btc_usdt',
-    pyth: '0xe62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43',
-  },
-  '2260fac5e5542a773aa44fbcfedf7c193bc2c599.factory.bridge.near': {
-    decimals: 8,
-    coingecko: 'wrapped-bitcoin',
-    binance: 'WBTCBTC',
-    huobi: 'wbtcusdt',
-    cryptocom: 'WBTC_USDT',
-    kucoin: 'WBTC-USDT',
-    gate: 'wbtc_usdt',
-    pyth: '0xc9d8b075a5c69303365ae23633d4e085199bf5c520a3b90fed1322a0342ffc33',
-  },
-  '6b175474e89094c44da98b954eedeac495271d0f.factory.bridge.near': {
-    decimals: 18,
-    stablecoin: true,
-    coingecko: 'dai',
-    binance: 'DAIUSDT',
-    binance_us: 'DAIUSD',
-    huobi: 'daiusdt',
-    cryptocom: 'DAI_USDT',
-    gate: 'dai_usdt',
-    pyth: '0xb0948a5e5313200c632b51bb5ca32f6de0d36e9950a942d19751e833f70dabfd',
-  },
-  'aaaaaa20d9e0e2461697782ef11675f668207961.factory.bridge.near': {
-    decimals: 18,
-    coingecko: 'aurora-near',
-    cryptocom: 'AURORA_USDT',
-    huobi: 'aurorausdt',
-    kucoin: 'AURORA-USDT',
-    gate: 'aurora_usdt',
-    pyth: '0x2f7c4f738d498585065a4b87b637069ec99474597da7f0ca349ba8ac3ba9cac5',
-  },
-  '4691937a7508860f876c9c0a2a617e7d9e945d4b.factory.bridge.near': {
-    decimals: 18,
-    coingecko: 'woo-network',
-    binance: 'WOOUSDT',
-    huobi: 'woousdt',
-    cryptocom: 'WOO_USDT',
-    kucoin: 'WOO-USDT',
-    gate: 'woo_usdt',
-    pyth: '0xb82449fd728133488d2d41131cffe763f9c1693b73c544d9ef6aaa371060dd25',
-  },
-  '853d955acef822db058eb8505911ed77f175b99e.factory.bridge.near': {
-    decimals: 18,
-    stablecoin: true,
-    coingecko: 'frax',
-    pyth: '0x7c53208632935ba5122c3cf65a0f4b3e72ba4955b49ad6ba0acf3d9ba405aef3',
-  },
-  '22.contract.portalbridge.near': {
-    decimals: 8,
-    coingecko: 'solana',
-    binance: 'SOLUSDT',
-    binance_us: 'SOLUSD',
-    huobi: 'solusdt',
-    cryptocom: 'SOL_USDT',
-    kucoin: 'SOL-USDT',
-    gate: 'sol_usdt',
-    pyth: '0xef0d8b6fda2ceba41da15d4095d1da392a0d2f8ed0c6c7bc0f4cfac8c280b56d',
-  },
-  'zec.omft.near': {
-    decimals: 8,
-    coingecko: 'zcash',
-    binance: 'ZECUSDT',
-    binance_us: 'ZECUSD',
-    huobi: 'zecusdt',
-    kucoin: 'ZEC-USDT',
-    gate: 'zec_usdt',
-    pyth: '0xbe9b59d178f0d6a97ab4c343bff2aa69caa1eaae3e9048a65788c529b125bb24',
-  },
-  'token.rhealab.near': {
-    decimals: 18,
-    binance_alpha: '0x4c067de26475e1cefee8b8d1f6e2266b33a2372e',
-    pyth: '0xded2a0d2624278a32c56725397cc98b24ddb83d8c4d2ce108b1fc44b1d8de22b',
-  },
-};
+const API_URL = 'https://api.outlayer.fastnear.com';
+const PROJECT_UUID = 'p0000000000000003';
+
+// Fetch token configs from public storage (config:assets)
+export async function fetchTokenConfigs(): Promise<TokensConfig> {
+  const response = await fetch(`${API_URL}/public/storage/batch`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      project_uuid: PROJECT_UUID,
+      keys: ['config:assets'],
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}`);
+  }
+
+  const batchResult = await response.json();
+  const item = batchResult.results?.['config:assets'];
+  if (!item?.exists || !item.value) {
+    return {};
+  }
+
+  return JSON.parse(atob(item.value));
+}
 
 // Token display names
 export const TOKEN_NAMES: Record<string, string> = {
@@ -185,19 +88,14 @@ export function getTokenIcon(contractId: string): string {
   return TOKEN_ICONS[contractId] || contractId.charAt(0).toUpperCase();
 }
 
-// Get token info
-export function getTokenInfo(contractId: string): TokenInfo | undefined {
-  return TOKENS[contractId];
+// Check if token is a stablecoin (uses dynamic config)
+export function isStablecoin(contractId: string, config: TokensConfig): boolean {
+  return config[contractId]?.stablecoin || false;
 }
 
-// Check if token is a stablecoin
-export function isStablecoin(contractId: string): boolean {
-  return TOKENS[contractId]?.stablecoin || false;
-}
-
-// Get number of price sources for a token
-export function getSourceCount(contractId: string): number {
-  const token = TOKENS[contractId];
+// Get number of price sources for a token (uses dynamic config)
+export function getSourceCount(contractId: string, config: TokensConfig): number {
+  const token = config[contractId];
   if (!token) return 0;
   let count = 0;
   if (token.coingecko) count++;
@@ -218,7 +116,7 @@ export function formatContractId(contractId: string): string {
   return `${contractId.slice(0, 12)}...${contractId.slice(-10)}`;
 }
 
-// Default tokens to display
+// Default tokens to display (used as loading skeleton)
 export const DEFAULT_TOKENS = [
   'wrap.near',
   'aurora',
@@ -227,6 +125,3 @@ export const DEFAULT_TOKENS = [
   '17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1',
   '22.contract.portalbridge.near',
 ];
-
-// Full token list
-export const ALL_TOKENS = Object.keys(TOKENS);

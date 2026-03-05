@@ -8,16 +8,15 @@
 
 mod sources;
 mod telegram;
-mod token_config;
 
 use anyhow::{Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use futures::future::join_all;
+use oracle_ark_sources::ExchangeConfig;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::env;
 use std::time::{Duration, Instant};
-use token_config::TokensConfig;
 use tracing::{debug, error, info, warn};
 
 /// Configuration loaded from environment
@@ -37,9 +36,6 @@ struct Config {
 
     /// Payment key for WASI calls (format: owner:nonce:secret)
     payment_key: String,
-
-    /// Tokens configuration loaded from tokens.json
-    tokens_config: TokensConfig,
 
     /// Update interval in seconds (time-based trigger)
     update_interval_secs: u64,
@@ -84,12 +80,6 @@ struct Config {
 
 impl Config {
     fn from_env() -> Result<Self> {
-        // Load tokens from tokens.json (shared with WASI)
-        let tokens_path = env::var("TOKENS_CONFIG")
-            .unwrap_or_else(|_| "../tokens.json".to_string());
-        let tokens_config = TokensConfig::load(&tokens_path)
-            .with_context(|| format!("Failed to load tokens from {}", tokens_path))?;
-
         Ok(Self {
             coordinator_url: env::var("COORDINATOR_URL")
                 .unwrap_or_else(|_| "https://api.outlayer.fastnear.com".to_string()),
@@ -97,7 +87,6 @@ impl Config {
             project_name: env::var("PROJECT_NAME").context("PROJECT_NAME not set")?,
             project_uuid: env::var("PROJECT_UUID").context("PROJECT_UUID not set")?,
             payment_key: env::var("PAYMENT_KEY").context("PAYMENT_KEY not set")?,
-            tokens_config,
             update_interval_secs: env::var("UPDATE_INTERVAL_SECS")
                 .unwrap_or_else(|_| "60".to_string())
                 .parse()
@@ -190,28 +179,10 @@ async fn main() -> Result<()> {
         .timeout(Duration::from_secs(30))
         .build()?;
 
-    let tokens = config.tokens_config.token_ids();
-
     info!("Starting oracle scheduler");
     info!("Coordinator: {}", config.coordinator_url);
     info!("Project: {}/{}", config.project_owner, config.project_name);
-    info!("Tokens: {} configured", tokens.len());
-    for token in &tokens {
-        let cfg = config.tokens_config.get(token).unwrap();
-        let sources: Vec<&str> = [
-            cfg.coingecko.as_ref().map(|_| "coingecko"),
-            cfg.binance.as_ref().map(|_| "binance"),
-            cfg.pyth.as_ref().map(|_| "pyth"),
-            cfg.huobi.as_ref().map(|_| "huobi"),
-            cfg.kucoin.as_ref().map(|_| "kucoin"),
-            cfg.gate.as_ref().map(|_| "gate"),
-            cfg.cryptocom.as_ref().map(|_| "cryptocom"),
-        ]
-        .into_iter()
-        .flatten()
-        .collect();
-        debug!("  {} -> {} sources: {:?}", token, sources.len(), sources);
-    }
+    info!("Exchange configs: loaded from public storage (config:assets)");
     info!(
         "Update interval: {}s, threshold: {}%",
         config.update_interval_secs, config.price_diff_threshold_percent
@@ -227,6 +198,11 @@ async fn main() -> Result<()> {
 
     // Track last update time per token
     let mut last_update: HashMap<String, Instant> = HashMap::new();
+
+    // Cached exchange configs from public storage, refreshed every hour
+    let mut exchange_configs_cache: Option<HashMap<String, ExchangeConfig>> = None;
+    let mut exchange_configs_fetched_at: Option<Instant> = None;
+    const EXCHANGE_CONFIGS_CACHE_TTL: Duration = Duration::from_secs(3600); // 1 hour
 
     // Cached oracle key mapping from contract (asset_id -> key_env_name), refreshed every hour
     let mut oracle_keys_cache: Option<HashMap<String, String>> = None;
@@ -249,6 +225,45 @@ async fn main() -> Result<()> {
     let poll_interval = Duration::from_secs(10);
 
     loop {
+        // Refresh exchange configs from public storage
+        let should_refresh_configs = exchange_configs_fetched_at
+            .map(|t| t.elapsed() >= EXCHANGE_CONFIGS_CACHE_TTL)
+            .unwrap_or(true);
+        if should_refresh_configs {
+            match fetch_exchange_configs(&client, &config).await {
+                Ok(configs) => {
+                    info!("Loaded {} exchange configs from public storage", configs.len());
+                    for (token, cfg) in &configs {
+                        let sources: Vec<&str> = [
+                            cfg.coingecko.as_ref().map(|_| "coingecko"),
+                            cfg.binance.as_ref().map(|_| "binance"),
+                            cfg.pyth.as_ref().map(|_| "pyth"),
+                            cfg.huobi.as_ref().map(|_| "huobi"),
+                            cfg.kucoin.as_ref().map(|_| "kucoin"),
+                            cfg.gate.as_ref().map(|_| "gate"),
+                            cfg.cryptocom.as_ref().map(|_| "cryptocom"),
+                        ]
+                        .into_iter()
+                        .flatten()
+                        .collect();
+                        debug!("  {} -> {} sources: {:?}", token, sources.len(), sources);
+                    }
+                    exchange_configs_cache = Some(configs);
+                    exchange_configs_fetched_at = Some(Instant::now());
+                }
+                Err(e) => {
+                    if exchange_configs_cache.is_none() {
+                        error!("Failed to load exchange configs and no cache available: {}", e);
+                        tokio::time::sleep(poll_interval).await;
+                        continue;
+                    }
+                    warn!("Failed to refresh exchange configs: {}. Using cached.", e);
+                }
+            }
+        }
+
+        let exchange_configs = exchange_configs_cache.as_ref().unwrap();
+
         // Refresh oracle keys cache if expired or not yet fetched
         if config.update_contract_enabled {
             let should_refresh = oracle_keys_fetched_at
@@ -343,7 +358,7 @@ async fn main() -> Result<()> {
             }
         }
 
-        match poll_and_update(&client, &config, &mut last_update, oracle_keys_cache.as_ref(), contract_update_paused).await {
+        match poll_and_update(&client, &config, &mut last_update, oracle_keys_cache.as_ref(), contract_update_paused, exchange_configs).await {
             Ok(_) => {
                 consecutive_failures = 0;
             }
@@ -370,49 +385,6 @@ async fn main() -> Result<()> {
 
         tokio::time::sleep(poll_interval).await;
     }
-}
-
-/// Read asset IDs from the oracle contract via NEAR RPC view call.
-/// Returns Vec of asset_id strings, or error.
-async fn read_contract_assets(
-    client: &reqwest::Client,
-    rpc_url: &str,
-    contract_id: &str,
-) -> Result<Vec<String>> {
-    let body = serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": "oracle-scheduler",
-        "method": "query",
-        "params": {
-            "request_type": "call_function",
-            "finality": "optimistic",
-            "account_id": contract_id,
-            "method_name": "get_assets",
-            "args_base64": BASE64.encode(b"{}")
-        }
-    });
-
-    let resp = client
-        .post(rpc_url)
-        .json(&body)
-        .send()
-        .await
-        .context("RPC request failed")?;
-
-    let rpc_resp: serde_json::Value = resp.json().await.context("RPC response parse failed")?;
-
-    let result_bytes = rpc_resp["result"]["result"]
-        .as_array()
-        .context("Missing result.result array in RPC response")?
-        .iter()
-        .map(|v| v.as_u64().unwrap_or(0) as u8)
-        .collect::<Vec<u8>>();
-
-    // Response is Vec<(AssetId, Asset)> — we only need the asset IDs
-    let assets: Vec<(String, serde_json::Value)> =
-        serde_json::from_slice(&result_bytes).context("Failed to parse get_assets response")?;
-
-    Ok(assets.into_iter().map(|(id, _)| id).collect())
 }
 
 /// Read asset -> oracle key env var mapping from contract.
@@ -566,6 +538,10 @@ async fn check_near_balance(
     let rpc_resp: serde_json::Value = resp.json().await.context("RPC response parse failed")?;
 
     if let Some(error) = rpc_resp.get("error") {
+        // UNKNOWN_ACCOUNT means the implicit account hasn't been funded yet — treat as balance 0
+        if error.to_string().contains("UNKNOWN_ACCOUNT") {
+            return Ok(0.0);
+        }
         anyhow::bail!("RPC error: {}", error);
     }
 
@@ -579,45 +555,49 @@ async fn check_near_balance(
     Ok(near)
 }
 
-/// Resolve the effective token list:
-/// - If oracle_contract_id is set, read assets from contract and intersect with tokens.json
-/// - Otherwise, use tokens.json as-is
-async fn resolve_tokens(
+/// Fetch exchange configs from public storage (config:assets key).
+async fn fetch_exchange_configs(
     client: &reqwest::Client,
     config: &Config,
-) -> Vec<String> {
-    let file_tokens = config.tokens_config.token_ids();
+) -> Result<HashMap<String, ExchangeConfig>> {
+    let url = format!("{}/public/storage/batch", config.coordinator_url);
+    let body = serde_json::json!({
+        "project_uuid": config.project_uuid,
+        "keys": ["config:assets"],
+    });
 
-    let Some(contract_id) = &config.oracle_contract_id else {
-        return file_tokens;
-    };
+    let resp = client
+        .post(&url)
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .send()
+        .await?;
 
-    match read_contract_assets(client, &config.near_rpc_url, contract_id).await {
-        Ok(contract_assets) => {
-            // Intersect: only tokens present in BOTH contract and tokens.json
-            let file_set: std::collections::HashSet<&str> =
-                file_tokens.iter().map(|s| s.as_str()).collect();
-            let contract_count = contract_assets.len();
-            let result: Vec<String> = contract_assets
-                .into_iter()
-                .filter(|a| file_set.contains(a.as_str()))
-                .collect();
-
-            if result.len() < file_tokens.len() {
-                debug!(
-                    "Contract has {} assets, tokens.json has {}, intersection: {}",
-                    contract_count,
-                    file_tokens.len(),
-                    result.len()
-                );
-            }
-            result
-        }
-        Err(e) => {
-            warn!("Failed to read assets from contract: {}. Using tokens.json", e);
-            file_tokens
-        }
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        anyhow::bail!("HTTP {}: {}", status, text);
     }
+
+    let batch_resp: BatchStorageResponse = resp.json().await?;
+    let item = batch_resp
+        .results
+        .get("config:assets")
+        .context("config:assets not in response")?;
+
+    if !item.exists {
+        anyhow::bail!(
+            "config:assets not found in public storage. Run sync_asset_configs on the contract first."
+        );
+    }
+
+    let value_b64 = item
+        .value
+        .as_deref()
+        .context("config:assets exists but value is null")?;
+    let bytes = BASE64.decode(value_b64)?;
+    let configs: HashMap<String, ExchangeConfig> = serde_json::from_slice(&bytes)?;
+    Ok(configs)
 }
 
 async fn poll_and_update(
@@ -626,22 +606,24 @@ async fn poll_and_update(
     last_update: &mut HashMap<String, Instant>,
     oracle_keys: Option<&HashMap<String, String>>,
     contract_update_paused: bool,
+    exchange_configs: &HashMap<String, ExchangeConfig>,
 ) -> Result<()> {
     // Reset Chainlink disabled state each cycle (scheduler is long-lived)
     oracle_ark_sources::CHAINLINK_DISABLED.store(false, std::sync::atomic::Ordering::Relaxed);
 
-    let tokens = resolve_tokens(client, config).await;
+    let tokens: Vec<String> = exchange_configs.keys().cloned().collect();
     let api_key = env::var("API_KEY").ok();
 
     // 1. Fetch current prices from external sources in parallel (for comparison only!)
     let fetch_futures: Vec<_> = tokens
         .iter()
         .map(|token| {
+            let config_for_token = exchange_configs[token].clone();
             let token = token.clone();
             let api_key = api_key.clone();
             async move {
                 let result =
-                    sources::fetch_price(client, &token, &config.tokens_config, api_key.as_deref())
+                    sources::fetch_price(client, &token, &config_for_token, api_key.as_deref())
                         .await;
                 (token, result)
             }

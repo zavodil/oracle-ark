@@ -106,6 +106,20 @@ pub enum ProposalAction {
         asset_ids: Vec<AssetId>,
     },
 
+    /// Set exchange config for one asset. Config is opaque JSON — parsed by WASI, not contract.
+    SetAssetExchangeConfig {
+        asset_id: AssetId,
+        config: String,
+    },
+    /// Batch set exchange configs (initial setup or bulk updates)
+    SetAssetExchangeConfigs {
+        configs: Vec<(AssetId, String)>,
+    },
+    /// Remove exchange config for an asset
+    RemoveAssetExchangeConfig {
+        asset_id: AssetId,
+    },
+
     // Owner
     UpdateOwner {
         #[schemars(with = "String")]
@@ -244,25 +258,40 @@ impl Contract {
     /// Create a proposal. Only council members can propose.
     /// Caller's vote is automatically counted.
     /// If threshold == 1, the proposal is auto-executed immediately.
+    /// Requires at least 1 yoctoNEAR. For config proposals, attach extra for storage deposit.
     #[payable]
     pub fn create_proposal(&mut self, action: ProposalAction) -> u64 {
-        assert_one_yocto();
+        assert!(
+            env::attached_deposit().as_yoctonear() >= 1,
+            "Requires at least 1 yoctoNEAR"
+        );
         let caller = env::predecessor_account_id();
         self.assert_council_member(&caller);
-        self.internal_create_proposal(caller, action)
+
+        let storage_before = env::storage_usage();
+        let id = self.internal_create_proposal(caller.clone(), action);
+        self.refund_storage_excess(caller, storage_before);
+        id
     }
 
     /// Create multiple proposals in one transaction.
     /// Each action becomes a separate proposal. All auto-execute if threshold == 1.
     #[payable]
     pub fn create_proposals(&mut self, actions: Vec<ProposalAction>) -> Vec<u64> {
-        assert_one_yocto();
+        assert!(
+            env::attached_deposit().as_yoctonear() >= 1,
+            "Requires at least 1 yoctoNEAR"
+        );
         let caller = env::predecessor_account_id();
         self.assert_council_member(&caller);
-        actions
+
+        let storage_before = env::storage_usage();
+        let ids: Vec<u64> = actions
             .into_iter()
             .map(|action| self.internal_create_proposal(caller.clone(), action))
-            .collect()
+            .collect();
+        self.refund_storage_excess(caller, storage_before);
+        ids
     }
 
     /// Vote to approve a proposal. Only council members can vote.
@@ -358,6 +387,24 @@ impl Contract {
 // =============================================================================
 
 impl Contract {
+    /// Charge for storage growth; refund excess deposit.
+    fn refund_storage_excess(&self, caller: AccountId, storage_before: u64) {
+        let storage_after = env::storage_usage();
+        let storage_cost = u128::from(storage_after.saturating_sub(storage_before))
+            * env::storage_byte_cost().as_yoctonear();
+        let deposit = env::attached_deposit().as_yoctonear();
+        assert!(
+            deposit >= storage_cost,
+            "Insufficient deposit for storage. Need {} yoctoNEAR, got {}",
+            storage_cost,
+            deposit
+        );
+        let refund = deposit - storage_cost;
+        if refund > 1 {
+            Promise::new(caller).transfer(NearToken::from_yoctonear(refund));
+        }
+    }
+
     pub fn assert_council_member(&self, account_id: &AccountId) {
         assert!(
             self.council_members.contains(account_id),
@@ -564,6 +611,34 @@ impl Contract {
                     "Cannot remove last council member"
                 );
                 log!("Council member removed: {} (threshold now {})", account_id, self.required_votes());
+            }
+            ProposalAction::SetAssetExchangeConfig { asset_id, config } => {
+                assert!(
+                    self.internal_get_asset(asset_id).is_some(),
+                    "Asset not found: {}",
+                    asset_id
+                );
+                self.asset_exchange_configs.insert(asset_id, config);
+                log!("Exchange config set for {}", asset_id);
+            }
+            ProposalAction::SetAssetExchangeConfigs { configs } => {
+                for (asset_id, config) in configs {
+                    assert!(
+                        self.internal_get_asset(asset_id).is_some(),
+                        "Asset not found: {}",
+                        asset_id
+                    );
+                    self.asset_exchange_configs.insert(asset_id, config);
+                    log!("Exchange config set for {}", asset_id);
+                }
+            }
+            ProposalAction::RemoveAssetExchangeConfig { asset_id } => {
+                assert!(
+                    self.asset_exchange_configs.remove(asset_id).is_some(),
+                    "Exchange config not found: {}",
+                    asset_id
+                );
+                log!("Exchange config removed for {}", asset_id);
             }
             ProposalAction::UpdateOwner { owner_id } => {
                 self.owner_id = owner_id.clone();

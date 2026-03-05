@@ -2,7 +2,7 @@
 //!
 //! This module provides both sync (WASI) and async (scheduler) implementations.
 
-use crate::{parsers, token_map, SourcePrice};
+use crate::{parsers, ExchangeConfig, SourcePrice};
 #[cfg(feature = "wasi")]
 use crate::{CustomSourceConfig, HttpResponse};
 use anyhow::Result;
@@ -296,75 +296,65 @@ pub mod sync {
         })
     }
 
-    /// Fetch price from all available sources for a token
-    pub fn fetch_all_sources(token: &str, api_key: Option<&str>) -> Vec<SourcePrice> {
+    /// Fetch price from all available sources for a token using exchange config
+    pub fn fetch_all_sources(config: &ExchangeConfig, api_key: Option<&str>) -> Vec<SourcePrice> {
         let mut prices = Vec::new();
 
-        // CoinGecko
-        if let Some(cg_id) = token_map::get_coingecko_id(token) {
+        if let Some(ref cg_id) = config.coingecko {
             if let Ok(p) = fetch_coingecko(cg_id, api_key) {
                 prices.push(p);
             }
         }
 
-        // Binance
-        if let Some(symbol) = token_map::get_binance_symbol(token) {
+        if let Some(ref symbol) = config.binance {
             if let Ok(p) = fetch_binance(symbol) {
                 prices.push(p);
             }
         }
 
-        // Binance US
-        if let Some(symbol) = token_map::get_binance_us_symbol(token) {
+        if let Some(ref symbol) = config.binance_us {
             if let Ok(p) = fetch_binance_us(symbol) {
                 prices.push(p);
             }
         }
 
-        // Binance Alpha (for tokens like Rhea)
-        if let Some(address) = token_map::get_binance_alpha_address(token) {
+        if let Some(ref address) = config.binance_alpha {
             if let Ok(p) = fetch_binance_alpha(address) {
                 prices.push(p);
             }
         }
 
-        // Pyth
-        if let Some(price_id) = token_map::get_pyth_id(token) {
+        if let Some(price_id) = config.pyth_id() {
             if let Ok(p) = fetch_pyth(price_id) {
                 prices.push(p);
             }
         }
 
-        // Chainlink (Ethereum on-chain oracle)
-        if let Some(feed_address) = token_map::get_chainlink_address(token) {
+        if let Some(ref feed_address) = config.chainlink {
             if let Ok(p) = fetch_chainlink(feed_address) {
                 prices.push(p);
             }
         }
 
-        // Huobi
-        if let Some(symbol) = token_map::get_huobi_symbol(token) {
+        if let Some(ref symbol) = config.huobi {
             if let Ok(p) = fetch_huobi(symbol) {
                 prices.push(p);
             }
         }
 
-        // KuCoin
-        if let Some(symbol) = token_map::get_kucoin_symbol(token) {
+        if let Some(ref symbol) = config.kucoin {
             if let Ok(p) = fetch_kucoin(symbol) {
                 prices.push(p);
             }
         }
 
-        // Gate.io
-        if let Some(pair) = token_map::get_gate_pair(token) {
+        if let Some(ref pair) = config.gate {
             if let Ok(p) = fetch_gate(pair) {
                 prices.push(p);
             }
         }
 
-        // Crypto.com
-        if let Some(instrument) = token_map::get_cryptocom_instrument(token) {
+        if let Some(ref instrument) = config.cryptocom {
             if let Ok(p) = fetch_cryptocom(instrument) {
                 prices.push(p);
             }
@@ -626,79 +616,69 @@ pub mod r#async {
         })
     }
 
-    /// Fetch price from all available sources for a token
+    /// Fetch price from all available sources for a token using exchange config
     pub async fn fetch_all_sources(
         client: &reqwest::Client,
-        token: &str,
+        config: &ExchangeConfig,
         api_key: Option<&str>,
     ) -> Vec<SourcePrice> {
         let mut prices = Vec::new();
 
-        // CoinGecko
-        if let Some(cg_id) = token_map::get_coingecko_id(token) {
+        if let Some(ref cg_id) = config.coingecko {
             if let Ok(p) = fetch_coingecko(client, cg_id, api_key).await {
                 prices.push(p);
             }
         }
 
-        // Binance
-        if let Some(symbol) = token_map::get_binance_symbol(token) {
+        if let Some(ref symbol) = config.binance {
             if let Ok(p) = fetch_binance(client, symbol).await {
                 prices.push(p);
             }
         }
 
-        // Binance US
-        if let Some(symbol) = token_map::get_binance_us_symbol(token) {
+        if let Some(ref symbol) = config.binance_us {
             if let Ok(p) = fetch_binance_us(client, symbol).await {
                 prices.push(p);
             }
         }
 
-        // Binance Alpha (for tokens like Rhea)
-        if let Some(address) = token_map::get_binance_alpha_address(token) {
+        if let Some(ref address) = config.binance_alpha {
             if let Ok(p) = fetch_binance_alpha(client, address).await {
                 prices.push(p);
             }
         }
 
-        // Pyth
-        if let Some(price_id) = token_map::get_pyth_id(token) {
+        if let Some(price_id) = config.pyth_id() {
             if let Ok(p) = fetch_pyth(client, price_id).await {
                 prices.push(p);
             }
         }
 
-        // Chainlink (Ethereum on-chain oracle)
-        if let Some(feed_address) = token_map::get_chainlink_address(token) {
+        if let Some(ref feed_address) = config.chainlink {
             if let Ok(p) = fetch_chainlink(client, feed_address).await {
                 prices.push(p);
             }
         }
 
-        // Huobi
-        if let Some(symbol) = token_map::get_huobi_symbol(token) {
+        if let Some(ref symbol) = config.huobi {
             if let Ok(p) = fetch_huobi(client, symbol).await {
                 prices.push(p);
             }
         }
 
-        // KuCoin
-        if let Some(symbol) = token_map::get_kucoin_symbol(token) {
+        if let Some(ref symbol) = config.kucoin {
             if let Ok(p) = fetch_kucoin(client, symbol).await {
                 prices.push(p);
             }
         }
 
-        // Gate.io
-        if let Some(pair) = token_map::get_gate_pair(token) {
+        if let Some(ref pair) = config.gate {
             if let Ok(p) = fetch_gate(client, pair).await {
                 prices.push(p);
             }
         }
 
-        // Crypto.com
-        if let Some(instrument) = token_map::get_cryptocom_instrument(token) {
+        if let Some(ref instrument) = config.cryptocom {
             if let Ok(p) = fetch_cryptocom(client, instrument).await {
                 prices.push(p);
             }

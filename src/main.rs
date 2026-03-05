@@ -234,13 +234,39 @@ fn handle_update_prices(
     }
 
     // If update_contract is true, sign and send report_prices tx to the oracle contract
+    // Throttle: skip tokens reported to contract less than 20s ago
+    const MIN_CONTRACT_REPORT_INTERVAL: u64 = 20;
+
     if update_contract {
         if let Some(contract_id) = contract_id {
-            // Build AssetPrice entries from successful results
+            let now = current_timestamp();
+
+            // Build AssetPrice entries from successful results, skipping recently-reported ones
             // Contract Price format: { multiplier: u128 as string, decimals: u8 }
             // We use decimals=8, so multiplier = price * 10^8
             let prices_for_contract: Vec<(String, serde_json::Value)> = results.iter()
                 .filter(|r| r.price.is_some() && r.error.is_none())
+                .filter(|r| {
+                    // Check last_contract_report from stored price
+                    let key = StoredPrice::storage_key(&r.token);
+                    match storage::get_worker(&key) {
+                        Ok(Some(data)) => {
+                            match serde_json::from_slice::<StoredPrice>(&data) {
+                                Ok(stored) => {
+                                    if let Some(last_report) = stored.last_contract_report {
+                                        if now.saturating_sub(last_report) < MIN_CONTRACT_REPORT_INTERVAL {
+                                            eprintln!("{}: skipping contract report ({}s since last)", r.token, now - last_report);
+                                            return false;
+                                        }
+                                    }
+                                    true
+                                }
+                                Err(_) => true,
+                            }
+                        }
+                        _ => true,
+                    }
+                })
                 .map(|r| {
                     let price_f64 = r.price.unwrap();
                     let multiplier = (price_f64 * 100_000_000.0).round() as u128;
@@ -256,30 +282,45 @@ fn handle_update_prices(
 
             if !prices_for_contract.is_empty() {
                 // Group prices by oracle key
-                let mut by_key: std::collections::HashMap<String, Vec<serde_json::Value>> =
+                let mut by_key: std::collections::HashMap<String, Vec<(String, serde_json::Value)>> =
                     std::collections::HashMap::new();
 
                 if let Some(keys) = oracle_keys {
                     // Only push assets that have explicit key assignments
-                    for (asset_id, price_json) in &prices_for_contract {
-                        if let Some(key_name) = keys.get(asset_id) {
-                            by_key.entry(key_name.clone()).or_default().push(price_json.clone());
+                    for (asset_id, price_json) in prices_for_contract {
+                        if let Some(key_name) = keys.get(&asset_id) {
+                            by_key.entry(key_name.clone()).or_default().push((asset_id, price_json));
                         }
                         // Assets without key mapping are warm-only (not pushed to contract)
                     }
                 } else {
                     // No oracle_keys provided — push all with default key
                     let default_key = "PROTECTED_ORACLE_KEY".to_string();
-                    for (_, price_json) in &prices_for_contract {
-                        by_key.entry(default_key.clone()).or_default().push(price_json.clone());
+                    for entry in prices_for_contract {
+                        by_key.entry(default_key.clone()).or_default().push(entry);
                     }
                 }
 
                 // Send one transaction per key
-                for (key_name, prices) in &by_key {
-                    let args = serde_json::json!({ "prices": prices });
+                for (key_name, entries) in &by_key {
+                    let price_jsons: Vec<&serde_json::Value> = entries.iter().map(|(_, j)| j).collect();
+                    let args = serde_json::json!({ "prices": price_jsons });
                     match report_prices_to_contract(contract_id, key_name, &args.to_string()) {
-                        Ok(hash) => eprintln!("Contract updated via {}: {}", key_name, hash),
+                        Ok(hash) => {
+                            eprintln!("Contract updated via {}: {}", key_name, hash);
+                            // Mark reported tokens with last_contract_report timestamp
+                            for (asset_id, _) in entries {
+                                let key = StoredPrice::storage_key(asset_id);
+                                if let Ok(Some(data)) = storage::get_worker(&key) {
+                                    if let Ok(mut stored) = serde_json::from_slice::<StoredPrice>(&data) {
+                                        stored.last_contract_report = Some(now);
+                                        if let Ok(json) = serde_json::to_vec(&stored) {
+                                            let _ = storage::set_worker_with_options(&key, &json, Some(false));
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         Err(e) => {
                             let signer_info = env::var(key_name)
                                 .ok()
@@ -292,7 +333,7 @@ fn handle_update_prices(
                                 &format!(
                                     "Contract: {}\nKey: {}\nSigner: {}\nAssets: {:?}\nError: {}\n\nIf 'account not found': fund the implicit account with ≥0.01 NEAR",
                                     contract_id, key_name, signer_info,
-                                    prices.iter().filter_map(|p| p["asset_id"].as_str()).collect::<Vec<_>>(),
+                                    entries.iter().filter_map(|(_, p)| p["asset_id"].as_str()).collect::<Vec<_>>(),
                                     e
                                 ),
                             );

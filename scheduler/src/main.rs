@@ -43,9 +43,6 @@ struct Config {
     /// Update interval for priority assets (NEAR, BTC, ETH) — default: same as update_interval
     update_interval_priority_secs: u64,
 
-    /// Update interval for stablecoins — default: 300s
-    update_interval_stablecoin_secs: u64,
-
     /// Priority asset IDs (updated more frequently)
     priority_assets: Vec<String>,
 
@@ -109,10 +106,6 @@ impl Config {
                         .and_then(|v| v.parse().ok())
                         .unwrap_or(60)
                 }),
-            update_interval_stablecoin_secs: env::var("UPDATE_INTERVAL_STABLECOIN_SECS")
-                .unwrap_or_else(|_| "300".to_string())
-                .parse()
-                .unwrap_or(300),
             priority_assets: env::var("PRIORITY_ASSETS")
                 .unwrap_or_else(|_| "wrap.near,nbtc.bridge.near,aurora".to_string())
                 .split(',')
@@ -212,10 +205,9 @@ async fn main() -> Result<()> {
     info!("Project: {}/{}", config.project_owner, config.project_name);
     info!("Exchange configs: loaded from public storage (config:assets)");
     info!(
-        "Update intervals: priority={}s, normal={}s, stablecoin={}s, threshold={}%",
+        "Update intervals: priority={}s, full={}s, threshold={}%",
         config.update_interval_priority_secs,
         config.update_interval_secs,
-        config.update_interval_stablecoin_secs,
         config.price_diff_threshold_percent
     );
     info!("Priority assets: {:?}", config.priority_assets);
@@ -228,8 +220,9 @@ async fn main() -> Result<()> {
         if config.telegram_bot_token.is_some() { "enabled" } else { "disabled" }
     );
 
-    // Track last update time per token
-    let mut last_update: HashMap<String, Instant> = HashMap::new();
+    // Global batch timers (full update vs priority-only)
+    let mut last_priority_update: Option<Instant> = None;
+    let mut last_full_update: Option<Instant> = None;
 
     // Cached exchange configs from public storage, refreshed every hour
     let mut exchange_configs_cache: Option<HashMap<String, ExchangeConfig>> = None;
@@ -391,7 +384,7 @@ async fn main() -> Result<()> {
             }
         }
 
-        match poll_and_update(&client, &config, &mut last_update, oracle_keys_cache.as_ref(), contract_update_paused, exchange_configs, &mut alert_throttle).await {
+        match poll_and_update(&client, &config, &mut last_priority_update, &mut last_full_update, oracle_keys_cache.as_ref(), contract_update_paused, exchange_configs, &mut alert_throttle).await {
             Ok(_) => {
                 consecutive_failures = 0;
             }
@@ -633,29 +626,12 @@ async fn fetch_exchange_configs(
     Ok(configs)
 }
 
-/// Get update interval for a token based on its priority tier.
-fn token_update_interval(
-    config: &Config,
-    exchange_configs: &HashMap<String, ExchangeConfig>,
-    token: &str,
-) -> u64 {
-    if config.priority_assets.iter().any(|a| a == token) {
-        config.update_interval_priority_secs
-    } else if exchange_configs
-        .get(token)
-        .map(|c| c.stablecoin)
-        .unwrap_or(false)
-    {
-        config.update_interval_stablecoin_secs
-    } else {
-        config.update_interval_secs
-    }
-}
 
 async fn poll_and_update(
     client: &reqwest::Client,
     config: &Config,
-    last_update: &mut HashMap<String, Instant>,
+    last_priority_update: &mut Option<Instant>,
+    last_full_update: &mut Option<Instant>,
     oracle_keys: Option<&HashMap<String, String>>,
     contract_update_paused: bool,
     exchange_configs: &HashMap<String, ExchangeConfig>,
@@ -664,11 +640,11 @@ async fn poll_and_update(
     // Reset Chainlink disabled state each cycle (scheduler is long-lived)
     oracle_ark_sources::CHAINLINK_DISABLED.store(false, std::sync::atomic::Ordering::Relaxed);
 
-    let tokens: Vec<String> = exchange_configs.keys().cloned().collect();
+    let all_tokens: Vec<String> = exchange_configs.keys().cloned().collect();
     let api_key = env::var("API_KEY").ok();
 
     // 1. Fetch current prices from external sources in parallel (for comparison only!)
-    let fetch_futures: Vec<_> = tokens
+    let fetch_futures: Vec<_> = all_tokens
         .iter()
         .map(|token| {
             let config_for_token = exchange_configs[token].clone();
@@ -716,65 +692,64 @@ async fn poll_and_update(
         return Ok(());
     }
 
-    // 2. Batch read all stored prices from WASI public storage
+    // 2. Determine scheduled batch: full update or priority-only
+    let full_due = last_full_update
+        .map(|t| t.elapsed().as_secs() >= config.update_interval_secs)
+        .unwrap_or(true);
+    let priority_due = last_priority_update
+        .map(|t| t.elapsed().as_secs() >= config.update_interval_priority_secs)
+        .unwrap_or(true);
+
+    let mut tokens_to_update: Vec<String> = if full_due {
+        // Full batch: all tokens that have prices
+        info!("Full update due (every {}s)", config.update_interval_secs);
+        current_prices.keys().cloned().collect()
+    } else if priority_due {
+        // Priority batch: only priority tokens
+        info!("Priority update due (every {}s)", config.update_interval_priority_secs);
+        config.priority_assets.iter()
+            .filter(|t| current_prices.contains_key(t.as_str()))
+            .cloned()
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    // 3. Also add any tokens with significant price change (regardless of schedule)
     let tokens_to_read: Vec<&str> = current_prices.keys().map(|s| s.as_str()).collect();
     let stored_prices = read_public_storage_batch(client, config, &tokens_to_read).await?;
 
-    // 3. Check triggers for each token
-    let mut tokens_to_update = Vec::new();
-
     for (token, current_price) in &current_prices {
-        let stored_price = stored_prices.get(token);
-
-        let time_since_last = last_update
-            .get(token)
-            .map(|t| t.elapsed().as_secs())
-            .unwrap_or(u64::MAX);
-
-        let interval = token_update_interval(config, exchange_configs, token);
-        let time_trigger = time_since_last >= interval;
-
-        let price_trigger = match stored_price {
+        if tokens_to_update.contains(token) {
+            continue;
+        }
+        let price_trigger = match stored_prices.get(token) {
             Some(stored) => {
                 let diff = ((current_price - stored.price) / stored.price).abs() * 100.0;
-                debug!(
-                    "{}: current={:.4}, stored={:.4}, diff={:.2}%",
-                    token, current_price, stored.price, diff
-                );
                 diff > config.price_diff_threshold_percent
             }
-            None => {
-                info!("{}: no stored price, will trigger update", token);
-                true
-            }
+            None => true,
         };
-
-        if time_trigger || price_trigger {
-            let reason = if price_trigger && !time_trigger {
-                "price change"
-            } else if time_trigger && !price_trigger {
-                "interval"
-            } else {
-                "price change + interval"
-            };
-            info!(
-                "{}: triggering update (reason: {}, current={:.4})",
-                token, reason, current_price
-            );
+        if price_trigger {
+            info!("{}: triggering update (reason: price change, current={:.4})", token, current_price);
             tokens_to_update.push(token.clone());
         }
     }
 
     // 4. Trigger WASI update if needed
     if !tokens_to_update.is_empty() {
-        info!("Triggering WASI update for {} tokens", tokens_to_update.len());
+        let batch_type = if full_due { "full" } else if priority_due { "priority" } else { "price-triggered" };
+        info!("Triggering WASI update: {} tokens ({})", tokens_to_update.len(), batch_type);
 
         match call_wasi_update(client, config, &tokens_to_update, oracle_keys, contract_update_paused).await {
             Ok(_) => {
-                info!("Triggering WASI update successful");
+                info!("WASI update successful");
                 let now = Instant::now();
-                for token in &tokens_to_update {
-                    last_update.insert(token.clone(), now);
+                if full_due {
+                    *last_full_update = Some(now);
+                    *last_priority_update = Some(now);
+                } else if priority_due {
+                    *last_priority_update = Some(now);
                 }
             }
             Err(e) => {

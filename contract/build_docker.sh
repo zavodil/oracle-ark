@@ -26,3 +26,7 @@ ls -lh res/price_oracle.wasm
 
 echo "✅ Build complete: res/price_oracle.wasm"
 echo "Built in Docker: $DOCKER_IMAGE"
+
+# near contract deploy price-oracle.near use-file res/price_oracle.wasm without-init-call network-config mainnet sign-with-keychain send
+# near call price-oracle.near migrate_state --accountId price-oracle.near
+# near call price-oracle.near set_council '{"members": ["owner.price-oracle.near"], "threshold": 1}' --accountId owner.price-oracle.near --depositYocto 1

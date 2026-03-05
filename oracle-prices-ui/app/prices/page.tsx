@@ -173,6 +173,7 @@ export default function PricesPage() {
   const [countdown, setCountdown] = useState(REFRESH_INTERVAL_SEC);
   const [freshCount, setFreshCount] = useState(0);
   const countdownRef = useRef<NodeJS.Timeout | null>(null);
+  const lastFetchTimeRef = useRef<number>(Date.now());
 
   const fetchPrices = useCallback(async () => {
     const keys = ALL_TOKENS.map(assetId => `price:${assetId}`);
@@ -230,15 +231,19 @@ export default function PricesPage() {
   // Initial fetch and auto-refresh
   useEffect(() => {
     fetchPrices();
+    lastFetchTimeRef.current = Date.now();
 
     countdownRef.current = setInterval(() => {
-      setCountdown(prev => {
-        if (prev <= 1) {
-          fetchPrices();
-          return REFRESH_INTERVAL_SEC;
-        }
-        return prev - 1;
-      });
+      const elapsed = Math.floor((Date.now() - lastFetchTimeRef.current) / 1000);
+      const remaining = REFRESH_INTERVAL_SEC - elapsed;
+
+      if (remaining <= 0) {
+        fetchPrices();
+        lastFetchTimeRef.current = Date.now();
+        setCountdown(REFRESH_INTERVAL_SEC);
+      } else {
+        setCountdown(remaining);
+      }
     }, 1000);
 
     return () => {
@@ -250,6 +255,7 @@ export default function PricesPage() {
 
   const handleRefresh = () => {
     setCountdown(REFRESH_INTERVAL_SEC);
+    lastFetchTimeRef.current = Date.now();
     fetchPrices();
   };
 

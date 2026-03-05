@@ -14,6 +14,14 @@ pub mod sources;
 pub use parsers::*;
 
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicUsize;
+
+/// Last working Chainlink RPC index (shared across calls within a single WASI run)
+pub static LAST_CHAINLINK_RPC: AtomicUsize = AtomicUsize::new(0);
+
+/// If all Chainlink RPCs failed, disable further attempts for this run
+pub static CHAINLINK_DISABLED: AtomicBool = AtomicBool::new(false);
 
 /// Price result from a source
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -126,7 +134,7 @@ pub mod token_map {
     pub static PYTH_MAP: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| {
         let mut m = HashMap::new();
         // From user's list - these are the actual Pyth feed IDs
-        m.insert("wrap.near", "c415de8d2efa7db216527dff4b60e8f3a5311c740dadb233e13e12547e226750");
+        m.insert("wrap.near", "c415de8d2eba7db216527dff4b60e8f3a5311c740dadb233e13e12547e226750");
         m.insert("17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1", "eaa020c61cc479712813461ce153894a96a6c00b21ed0cfc2798d1f9a9e9c94a"); // USDC
         m.insert("nbtc.bridge.near", "e62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43"); // BTC
         m.insert("2260fac5e5542a773aa44fbcfedf7c193bc2c599.factory.bridge.near", "c9d8b075a5c69303365ae23633d4e085199bf5c520a3b90fed1322a0342ffc33"); // WBTC
@@ -140,6 +148,19 @@ pub mod token_map {
         m.insert("zec.omft.near", "be9b59d178f0d6a97ab4c343bff2aa69caa1eaae3e9048a65788c529b125bb24"); // ZEC
         m.insert("token.rhealab.near", "ded2a0d2624278a32c56725397cc98b24ddb83d8c4d2ce108b1fc44b1d8de22b"); // rhea (Pyth only)
         // m.insert("YU", "f42978c0e26f9f3148e4b43f62891475dde489e145ea5248749cd007dcc35fb6"); // YU - unknown token
+        m
+    });
+
+    /// Map NEAR token IDs to Chainlink Ethereum price feed contract addresses
+    /// Note: NEAR/USD feed (0xC12A6d1D827e23318266Ef16Ba6F397F2F91dA9b) was deprecated by Chainlink
+    pub static CHAINLINK_MAP: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| {
+        let mut m = HashMap::new();
+        m.insert("aurora", "0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419"); // ETH/USD
+        m.insert("usdt.tether-token.near", "0x3E7d1eAB13ad0104d2750B8863b489D65364e32D"); // USDT/USD
+        m.insert("17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1", "0x8fFfFfd4AfB6115b954Bd326cbe7B4BA576818f6"); // USDC/USD
+        m.insert("6b175474e89094c44da98b954eedeac495271d0f.factory.bridge.near", "0xAed0c38402a5d19df6E4c03F4E2DceD6e29c1ee9"); // DAI/USD
+        m.insert("nbtc.bridge.near", "0xF4030086522a5bEEa4988F8cA5B36dbC97BeE88c"); // BTC/USD
+        m.insert("853d955acef822db058eb8505911ed77f175b99e.factory.bridge.near", "0xB9E1E3A9feFf48998E45Fa90847ed4D467E8BcfD"); // FRAX/USD
         m
     });
 
@@ -207,6 +228,10 @@ pub mod token_map {
 
     pub fn get_pyth_id(token: &str) -> Option<&'static str> {
         PYTH_MAP.get(token).copied()
+    }
+
+    pub fn get_chainlink_address(token: &str) -> Option<&'static str> {
+        CHAINLINK_MAP.get(token).copied()
     }
 
     pub fn get_huobi_symbol(token: &str) -> Option<&'static str> {

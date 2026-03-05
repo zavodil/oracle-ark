@@ -108,6 +108,10 @@ pub(crate) mod u64_dec_format {
     }
 }
 
+pub(crate) fn bytes_to_hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{:02x}", b)).collect()
+}
+
 pub(crate) fn to_nano(ts: u32) -> Timestamp {
     Timestamp::from(ts) * 10u64.pow(9)
 }

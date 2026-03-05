@@ -53,11 +53,27 @@ struct Config {
     /// Contract ID to update (if update_contract_enabled)
     oracle_contract_id: Option<String>,
 
+    /// NEAR RPC URL for reading contract state
+    near_rpc_url: String,
+
+    /// Secrets profile for WASI calls that need PROTECTED_ keys (e.g., "default")
+    secrets_profile: Option<String>,
+
+    /// Secrets account ID (project owner's NEAR account)
+    secrets_account_id: Option<String>,
+
     /// Aggregation method: "median", "average", "weighted_average"
     aggregation_method: String,
 
     /// Minimum number of sources required
     min_sources_num: u8,
+
+    /// Oracle signer implicit account (hex, 64 chars) to check balance before pushing
+    /// When balance < oracle_min_balance_near, contract updates are paused (warm-only mode)
+    oracle_signer_account: Option<String>,
+
+    /// Minimum NEAR balance for oracle signer to push prices (default: 0.05)
+    oracle_min_balance_near: f64,
 
     /// Telegram bot token for alerts (optional)
     telegram_bot_token: Option<String>,
@@ -95,12 +111,21 @@ impl Config {
                 .parse()
                 .unwrap_or(false),
             oracle_contract_id: env::var("ORACLE_CONTRACT_ID").ok(),
+            secrets_profile: env::var("SECRETS_PROFILE").ok(),
+            secrets_account_id: env::var("SECRETS_ACCOUNT_ID").ok(),
+            near_rpc_url: env::var("NEAR_RPC_URL")
+                .unwrap_or_else(|_| "https://rpc.mainnet.near.org".to_string()),
             aggregation_method: env::var("AGGREGATION_METHOD")
                 .unwrap_or_else(|_| "median".to_string()),
             min_sources_num: env::var("MIN_SOURCES_NUM")
                 .unwrap_or_else(|_| "1".to_string())
                 .parse()
                 .unwrap_or(1),
+            oracle_signer_account: env::var("ORACLE_SIGNER_ACCOUNT").ok(),
+            oracle_min_balance_near: env::var("ORACLE_MIN_BALANCE_NEAR")
+                .unwrap_or_else(|_| "0.05".to_string())
+                .parse()
+                .unwrap_or(0.05),
             telegram_bot_token: env::var("TELEGRAM_BOT_TOKEN").ok(),
             telegram_chat_id: env::var("TELEGRAM_CHAT_ID").ok(),
         })
@@ -192,6 +217,9 @@ async fn main() -> Result<()> {
         config.update_interval_secs, config.price_diff_threshold_percent
     );
     info!("Update contract: {}", config.update_contract_enabled);
+    if let Some(ref contract_id) = config.oracle_contract_id {
+        info!("Contract asset source: {} (via {})", contract_id, config.near_rpc_url);
+    }
     info!(
         "Telegram alerts: {}",
         if config.telegram_bot_token.is_some() { "enabled" } else { "disabled" }
@@ -199,6 +227,16 @@ async fn main() -> Result<()> {
 
     // Track last update time per token
     let mut last_update: HashMap<String, Instant> = HashMap::new();
+
+    // Cached oracle key mapping from contract (asset_id -> key_env_name), refreshed every hour
+    let mut oracle_keys_cache: Option<HashMap<String, String>> = None;
+    let mut oracle_keys_fetched_at: Option<Instant> = None;
+    const ORACLE_KEYS_CACHE_TTL: Duration = Duration::from_secs(3600); // 1 hour
+
+    // Balance check for oracle signer (every 5 minutes)
+    let mut contract_update_paused = false;
+    let mut balance_check_at: Option<Instant> = None;
+    const BALANCE_CHECK_INTERVAL: Duration = Duration::from_secs(300);
 
     // Track consecutive failures for alerting
     let mut consecutive_failures: u32 = 0;
@@ -208,7 +246,73 @@ async fn main() -> Result<()> {
     let poll_interval = Duration::from_secs(10);
 
     loop {
-        match poll_and_update(&client, &config, &mut last_update).await {
+        // Refresh oracle keys cache if expired or not yet fetched
+        if config.update_contract_enabled {
+            let should_refresh = oracle_keys_fetched_at
+                .map(|t| t.elapsed() >= ORACLE_KEYS_CACHE_TTL)
+                .unwrap_or(true);
+            if should_refresh {
+                if let Some(ref contract_id) = config.oracle_contract_id {
+                    match read_asset_oracle_keys(&client, &config.near_rpc_url, contract_id).await {
+                        Ok(keys) => {
+                            if !keys.is_empty() {
+                                info!("Loaded {} oracle key mappings from contract", keys.len());
+                                for (asset, key) in &keys {
+                                    debug!("  {} -> {}", asset, key);
+                                }
+                            }
+                            oracle_keys_cache = if keys.is_empty() { None } else { Some(keys) };
+                            oracle_keys_fetched_at = Some(Instant::now());
+                        }
+                        Err(e) => {
+                            warn!("Failed to read oracle keys from contract: {}", e);
+                            // Keep using old cache if available
+                        }
+                    }
+                }
+            }
+        }
+
+        // Check oracle signer balance periodically
+        if config.update_contract_enabled {
+            if let Some(ref signer_account) = config.oracle_signer_account {
+                let should_check = balance_check_at
+                    .map(|t| t.elapsed() >= BALANCE_CHECK_INTERVAL)
+                    .unwrap_or(true);
+                if should_check {
+                    match check_near_balance(&client, &config.near_rpc_url, signer_account).await {
+                        Ok(balance) => {
+                            let was_paused = contract_update_paused;
+                            contract_update_paused = balance < config.oracle_min_balance_near;
+                            if contract_update_paused && !was_paused {
+                                warn!(
+                                    "Oracle signer {} balance {:.4} NEAR < min {:.4}, pausing contract updates",
+                                    signer_account, balance, config.oracle_min_balance_near
+                                );
+                                telegram::send_alert(
+                                    &client,
+                                    config.telegram_bot_token.as_deref(),
+                                    config.telegram_chat_id.as_deref(),
+                                    "Oracle Balance Low",
+                                    &format!(
+                                        "Account: {}\nBalance: {:.4} NEAR\nMinimum: {:.4} NEAR\n\nContract updates paused. Fund the account to resume.",
+                                        signer_account, balance, config.oracle_min_balance_near
+                                    ),
+                                ).await;
+                            } else if !contract_update_paused && was_paused {
+                                info!("Oracle signer {} balance {:.4} NEAR restored, resuming contract updates", signer_account, balance);
+                            }
+                            balance_check_at = Some(Instant::now());
+                        }
+                        Err(e) => {
+                            warn!("Failed to check oracle signer balance: {}", e);
+                        }
+                    }
+                }
+            }
+        }
+
+        match poll_and_update(&client, &config, &mut last_update, oracle_keys_cache.as_ref(), contract_update_paused).await {
             Ok(_) => {
                 consecutive_failures = 0;
             }
@@ -237,12 +341,184 @@ async fn main() -> Result<()> {
     }
 }
 
+/// Read asset IDs from the oracle contract via NEAR RPC view call.
+/// Returns Vec of asset_id strings, or error.
+async fn read_contract_assets(
+    client: &reqwest::Client,
+    rpc_url: &str,
+    contract_id: &str,
+) -> Result<Vec<String>> {
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": "oracle-scheduler",
+        "method": "query",
+        "params": {
+            "request_type": "call_function",
+            "finality": "optimistic",
+            "account_id": contract_id,
+            "method_name": "get_assets",
+            "args_base64": BASE64.encode(b"{}")
+        }
+    });
+
+    let resp = client
+        .post(rpc_url)
+        .json(&body)
+        .send()
+        .await
+        .context("RPC request failed")?;
+
+    let rpc_resp: serde_json::Value = resp.json().await.context("RPC response parse failed")?;
+
+    let result_bytes = rpc_resp["result"]["result"]
+        .as_array()
+        .context("Missing result.result array in RPC response")?
+        .iter()
+        .map(|v| v.as_u64().unwrap_or(0) as u8)
+        .collect::<Vec<u8>>();
+
+    // Response is Vec<(AssetId, Asset)> — we only need the asset IDs
+    let assets: Vec<(String, serde_json::Value)> =
+        serde_json::from_slice(&result_bytes).context("Failed to parse get_assets response")?;
+
+    Ok(assets.into_iter().map(|(id, _)| id).collect())
+}
+
+/// Read asset -> oracle key env var mapping from contract.
+/// Returns HashMap<asset_id, key_env_name> (e.g., "wrap.near" -> "PROTECTED_ORACLE_KEY_A").
+async fn read_asset_oracle_keys(
+    client: &reqwest::Client,
+    rpc_url: &str,
+    contract_id: &str,
+) -> Result<HashMap<String, String>> {
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": "oracle-scheduler",
+        "method": "query",
+        "params": {
+            "request_type": "call_function",
+            "finality": "optimistic",
+            "account_id": contract_id,
+            "method_name": "get_asset_oracle_keys",
+            "args_base64": BASE64.encode(b"{}")
+        }
+    });
+
+    let resp = client
+        .post(rpc_url)
+        .json(&body)
+        .send()
+        .await
+        .context("RPC request failed")?;
+
+    let rpc_resp: serde_json::Value = resp.json().await.context("RPC response parse failed")?;
+
+    let result_bytes = rpc_resp["result"]["result"]
+        .as_array()
+        .context("Missing result.result array in RPC response")?
+        .iter()
+        .map(|v| v.as_u64().unwrap_or(0) as u8)
+        .collect::<Vec<u8>>();
+
+    // Response is Vec<(AssetId, String)>
+    let pairs: Vec<(String, String)> =
+        serde_json::from_slice(&result_bytes).context("Failed to parse get_asset_oracle_keys response")?;
+
+    Ok(pairs.into_iter().collect())
+}
+
+/// Check NEAR balance of an account via RPC. Returns balance in NEAR.
+async fn check_near_balance(
+    client: &reqwest::Client,
+    rpc_url: &str,
+    account_id: &str,
+) -> Result<f64> {
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": "oracle-scheduler",
+        "method": "query",
+        "params": {
+            "request_type": "view_account",
+            "finality": "optimistic",
+            "account_id": account_id
+        }
+    });
+
+    let resp = client
+        .post(rpc_url)
+        .json(&body)
+        .send()
+        .await
+        .context("RPC request failed")?;
+
+    let rpc_resp: serde_json::Value = resp.json().await.context("RPC response parse failed")?;
+
+    if let Some(error) = rpc_resp.get("error") {
+        anyhow::bail!("RPC error: {}", error);
+    }
+
+    let amount_str = rpc_resp["result"]["amount"]
+        .as_str()
+        .context("Missing amount in view_account response")?;
+
+    // Convert yoctoNEAR to NEAR (1 NEAR = 10^24 yoctoNEAR)
+    let yocto: u128 = amount_str.parse().unwrap_or(0);
+    let near = yocto as f64 / 1e24;
+    Ok(near)
+}
+
+/// Resolve the effective token list:
+/// - If oracle_contract_id is set, read assets from contract and intersect with tokens.json
+/// - Otherwise, use tokens.json as-is
+async fn resolve_tokens(
+    client: &reqwest::Client,
+    config: &Config,
+) -> Vec<String> {
+    let file_tokens = config.tokens_config.token_ids();
+
+    let Some(contract_id) = &config.oracle_contract_id else {
+        return file_tokens;
+    };
+
+    match read_contract_assets(client, &config.near_rpc_url, contract_id).await {
+        Ok(contract_assets) => {
+            // Intersect: only tokens present in BOTH contract and tokens.json
+            let file_set: std::collections::HashSet<&str> =
+                file_tokens.iter().map(|s| s.as_str()).collect();
+            let contract_count = contract_assets.len();
+            let result: Vec<String> = contract_assets
+                .into_iter()
+                .filter(|a| file_set.contains(a.as_str()))
+                .collect();
+
+            if result.len() < file_tokens.len() {
+                debug!(
+                    "Contract has {} assets, tokens.json has {}, intersection: {}",
+                    contract_count,
+                    file_tokens.len(),
+                    result.len()
+                );
+            }
+            result
+        }
+        Err(e) => {
+            warn!("Failed to read assets from contract: {}. Using tokens.json", e);
+            file_tokens
+        }
+    }
+}
+
 async fn poll_and_update(
     client: &reqwest::Client,
     config: &Config,
     last_update: &mut HashMap<String, Instant>,
+    oracle_keys: Option<&HashMap<String, String>>,
+    contract_update_paused: bool,
 ) -> Result<()> {
-    let tokens = config.tokens_config.token_ids();
+    // Reset Chainlink disabled state each cycle (scheduler is long-lived)
+    oracle_ark_sources::CHAINLINK_DISABLED.store(false, std::sync::atomic::Ordering::Relaxed);
+
+    let tokens = resolve_tokens(client, config).await;
     let api_key = env::var("API_KEY").ok();
 
     // 1. Fetch current prices from external sources in parallel (for comparison only!)
@@ -345,7 +621,7 @@ async fn poll_and_update(
     if !tokens_to_update.is_empty() {
         info!("Triggering WASI update for {} tokens", tokens_to_update.len());
 
-        match call_wasi_update(client, config, &tokens_to_update).await {
+        match call_wasi_update(client, config, &tokens_to_update, oracle_keys, contract_update_paused).await {
             Ok(_) => {
                 info!("Triggering WASI update successful");
                 let now = Instant::now();
@@ -437,27 +713,51 @@ async fn call_wasi_update(
     client: &reqwest::Client,
     config: &Config,
     tokens: &[String],
+    oracle_keys: Option<&HashMap<String, String>>,
+    contract_update_paused: bool,
 ) -> Result<()> {
     let url = format!(
         "{}/call/{}/{}",
         config.coordinator_url, config.project_owner, config.project_name
     );
 
+    // When balance is low, run warm-only (fetch + cache, no contract push)
+    let effective_update_contract = config.update_contract_enabled && !contract_update_paused;
+
     // Build WASI input - NOTE: we do NOT pass prices!
     // WASI will fetch its own prices from sources inside TEE
-    let input = serde_json::json!({
+    let mut input = serde_json::json!({
         "command": "update_prices",
         "tokens": tokens,
-        "update_contract": config.update_contract_enabled,
+        "update_contract": effective_update_contract,
         "contract_id": config.oracle_contract_id,
         "aggregation_method": config.aggregation_method,
         "min_sources_num": config.min_sources_num,
     });
 
-    let body = serde_json::json!({
+    // Pass oracle key mapping only when actually updating contract
+    if effective_update_contract {
+        if let Some(keys) = oracle_keys {
+            input["oracle_keys"] = serde_json::to_value(keys).unwrap_or_default();
+        }
+    }
+
+    let mut body = serde_json::json!({
         "input": input,
         "async": false,  // Wait for result
     });
+
+    // Include secrets only when actually updating contract
+    if effective_update_contract {
+        if let (Some(profile), Some(account_id)) = (&config.secrets_profile, &config.secrets_account_id) {
+            body["secrets_ref"] = serde_json::json!({
+                "profile": profile,
+                "account_id": account_id,
+            });
+        } else {
+            warn!("UPDATE_CONTRACT_ENABLED=true but SECRETS_PROFILE/SECRETS_ACCOUNT_ID not set. WASI won't have secrets (PROTECTED_ keys etc).");
+        }
+    }
 
     debug!("Calling WASI: {}", serde_json::to_string_pretty(&body)?);
 

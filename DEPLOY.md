@@ -1,18 +1,19 @@
 # Oracle-Ark Deployment Guide
 
-This guide covers deploying the complete oracle system to NEAR mainnet.
-
-## Architecture Overview
+## Architecture
 
 ```
 ┌─────────────────────┐     ┌─────────────────────┐     ┌─────────────────────┐
 │     Scheduler       │────▶│   WASI (OutLayer)   │────▶│   Contract (NEAR)   │
-│   (Docker/VPS)      │     │      (TEE)          │     │   oracle-ark.near   │
+│   (Docker/VPS)      │     │      (TEE)          │     │   price-oracle.near   │
 └─────────────────────┘     └─────────────────────┘     └─────────────────────┘
         │                           │                           │
    Triggers updates           Fetches prices              Stores prices
    every 60s or 1%           from APIs in TEE            for DeFi apps
 ```
+
+All contract state mutations go through **DAO proposals** (council vote, >50% threshold).
+The only owner-only operations are `set_council` (bootstrap) and the initial deploy.
 
 ## Prerequisites
 
@@ -22,386 +23,352 @@ This guide covers deploying the complete oracle system to NEAR mainnet.
 - Docker (for scheduler)
 - OutLayer account at https://outlayer.fastnear.com
 
-## Step 1: Deploy NEAR Contract
+## Initialization Order
 
-### 1.1 Build the contract
+The steps below must be followed **in this exact order** because of dependencies:
+
+| Step | Action | Requires | Method |
+|------|--------|----------|--------|
+| 1 | Build contract | - | cargo near build |
+| 2 | Deploy & migrate | - | owner (last time) |
+| 3 | Set council | deployed contract | owner (bootstrap) |
+| 4 | Configure OutLayer | council | DAO proposal |
+| 5 | Add assets | council | DAO proposal |
+| 6 | Register push signer | OutLayer + assets | DAO (calls OutLayer) |
+| 7 | Fund implicit account | push signer registered | NEAR transfer |
+| 8 | Enable subsidized calls | council | DAO proposal (optional) |
+| 9 | Deploy scheduler | everything above | Docker |
+
+---
+
+## Step 1: Build Contract
 
 ```bash
 cd wasi-examples/oracle-ark/contract
-./build_docker.sh
+cargo near build
 ```
 
-This creates `res/price_oracle.wasm`.
+Output: `target/near/price_oracle.wasm`
 
-### 1.2 Deploy to mainnet
+## Step 2: Deploy & Migrate
+
+### Fresh deployment
 
 ```bash
-# Deploy contract
-near contract deploy price-oracle.testnet use-file ./res/price_oracle.wasm without-init-call network-config testnet sign-with-keychain send
+# Deploy
+near contract deploy price-oracle.near \
+  use-file target/near/price_oracle.wasm \
+  without-init-call network-config mainnet sign-with-keychain send
 
-# Initialize contract
-near call price-oracle.testnet new '{
+# Initialize
+near call price-oracle.near new '{
   "recency_duration_sec": 300,
-  "owner_id": "zavodil2.testnet",
+  "owner_id": "owner.near",
   "near_claim_amount": "100000000000000000000000"
-}' --accountId price-oracle.testnet --networkId testnet
-
-
-# Upgrade contract
-WASM_BASE64=$(base64 -i target/near/price_oracle.wasm)
-near call price-oracle.testnet upgrade --base64 "$WASM_BASE64" --accountId zavodil2.testnet --gas 300000000000000 --networkId testnet
+}' --accountId price-oracle.near
 ```
 
+### Upgrade existing deployment
 
-### 1.3 Configure assets
-
+This is the **last time** the owner-only `upgrade` method is used.
+After this deploy, `upgrade` is removed — all future upgrades go through DAO.
 
 ```bash
-# Add all assets to track
-# Testnet
-./scripts/add_assets.sh price-oracle.testnet zavodil2.testnet testnet
-# Mainnet
-./scripts/add_assets.sh oracle-ark.near owner.near mainnet
+near call price-oracle.near upgrade \
+  --base64File target/near/price_oracle.wasm \
+  --accountId owner.near --deposit 0.000000000000000000000001 \
+  --gas 300000000000000
 ```
 
+The upgrade calls `migrate_state2` automatically, which adds:
+- `asset_oracle_keys` — per-asset TEE key mapping
+- `pending_upgrade_codes` — DAO upgrade code storage
+
+### Verify
 
 ```bash
-# Add assets to track (must match tokens.json)
-near call oracle-ark.your-account.near add_asset '{"asset_id": "wrap.near"}' \
-  --accountId your-account.near --depositYocto 1
-
-near call oracle-ark.your-account.near add_asset '{"asset_id": "usdt.tether-token.near"}' \
-  --accountId your-account.near --depositYocto 1
-
-# USDC on NEAR (note: long hash address)
-near call oracle-ark.your-account.near add_asset '{"asset_id": "17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1"}' \
-  --accountId your-account.near --depositYocto 1
+near view price-oracle.near get_version
 ```
 
-### 1.4 Add WASI worker as oracle
+## Step 3: Set Council
 
-The contract itself will be registered as an oracle (for WASI-provided prices):
+Bootstrap the council. This is the only remaining owner-only mutation.
+Threshold is automatic: >50% of members.
 
 ```bash
-near call oracle-ark.your-account.near add_oracle '{"account_id": "oracle-ark.your-account.near"}' \
-  --accountId your-account.near --depositYocto 1
+near call price-oracle.near set_council '{
+  "members": ["member1.near", "member2.near", "member3.near"]
+}' --accountId owner.near --deposit 0.000000000000000000000001
 ```
 
-## Step 2: Deploy WASI to OutLayer
+Verify:
+```bash
+near view price-oracle.near get_council_members
+near view price-oracle.near get_council_threshold
+```
 
-### 2.1 Build WASI binary
+> **From this point forward, all changes go through DAO proposals.**
+> With 1 council member, proposals auto-execute.
+> With 2+ members, use `approve_proposal` to vote.
+
+## Step 4: Configure OutLayer
+
+Required before any OutLayer calls (price fetching, push signer registration).
+
+```bash
+near call price-oracle.near create_proposal '{"action": {
+  "action": "configure_outlayer",
+  "outlayer_contract_id": "outlayer.near",
+  "code_source": "{\"Project\":{\"project_id\":\"owner.near/oracle-ark\"}}",
+  "secrets_profile": "default",
+  "secrets_account_id": "owner.near"
+}}' --accountId member1.near --deposit 0.000000000000000000000001
+```
+
+If council has 2+ members:
+```bash
+near call price-oracle.near approve_proposal '{"id": 0}' \
+  --accountId member2.near --deposit 0.000000000000000000000001
+```
+
+## Step 5: Add Assets
+
+Assets must exist before registering a push signer.
+
+```bash
+near call price-oracle.near create_proposals '{"actions": [
+  {"action": "add_asset", "asset_id": "wrap.near", "push_signer_key": null},
+  {"action": "add_asset", "asset_id": "usdt.tether-token.near", "push_signer_key": null},
+  {"action": "add_asset", "asset_id": "17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1", "push_signer_key": null}
+]}' --accountId member1.near --deposit 0.000000000000000000000001
+```
+
+> `push_signer_key: null` — the key will be set by `RegisterPushSigner` in step 6.
+
+Add EMAs if needed:
+```bash
+near call price-oracle.near create_proposals '{"actions": [
+  {"action": "add_asset_ema", "asset_id": "wrap.near", "period_sec": 3600},
+  {"action": "add_asset_ema", "asset_id": "wrap.near", "period_sec": 86400}
+]}' --accountId member1.near --deposit 0.000000000000000000000001
+```
+
+## Step 6: Register TEE Push Signer
+
+This calls OutLayer WASI to resolve the `PROTECTED_` key into an implicit account,
+then creates a DAO proposal. On approval:
+- Registers the implicit account as oracle
+- Sets `push_signer_accounts` for each asset (only this account can push)
+- Sets `asset_oracle_keys` (which TEE key signs transactions)
+
+### 6.1 Create the PROTECTED key in OutLayer
+
+In OutLayer dashboard → Secrets:
+- Add a generated secret: name `PROTECTED_KEY_RHEA`, type `ed25519`
+
+### 6.2 Call propose_register_push_signer
+
+```bash
+near call price-oracle.near propose_register_push_signer '{
+  "push_signer_key": "PROTECTED_KEY_RHEA",
+  "asset_ids": [
+    "wrap.near",
+    "usdt.tether-token.near",
+    "17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1"
+  ],
+  "secrets_profile": "default",
+  "secrets_account_id": "owner.near"
+}' --accountId member1.near --deposit 0.000000000000000000000001 \
+  --gas 300000000000000
+```
+
+This triggers an OutLayer call. The callback creates a `RegisterPushSigner` proposal
+with the resolved implicit account ID. Check the proposal:
+
+```bash
+near view price-oracle.near get_proposals '{"limit": 5}'
+```
+
+If council has 2+ members, approve:
+```bash
+near call price-oracle.near approve_proposal '{"id": <proposal_id>}' \
+  --accountId member2.near --deposit 0.000000000000000000000001
+```
+
+## Step 7: Fund the Implicit Account
+
+The implicit account (64-char hex) needs NEAR to send transactions.
+Get the account ID from the approved proposal or from the contract:
+
+```bash
+near view price-oracle.near get_push_signer_accounts '{"asset_id": "wrap.near"}'
+# Returns: ["abcdef1234..."]
+```
+
+Fund it:
+```bash
+near send owner.near <implicit_account_id> 0.1
+```
+
+## Step 8: Enable Subsidized Calls (Optional)
+
+When enabled and contract balance > 20 NEAR, the contract pays for OutLayer calls
+so users can call `oracle_call` without attaching NEAR.
+
+```bash
+near call price-oracle.near create_proposal '{"action": {
+  "action": "set_subsidize_outlayer_calls",
+  "enabled": true
+}}' --accountId member1.near --deposit 0.000000000000000000000001
+```
+
+Check status:
+```bash
+near view price-oracle.near can_subsidize_outlayer_calls
+```
+
+## Step 9: Deploy Scheduler
+
+### 9.1 Build WASI
 
 ```bash
 cd wasi-examples/oracle-ark
 ./build.sh
 ```
 
-python3 upload_wasm_fastfs.py ../wasi-examples/oracle-ark/target/wasm32-wasip2/release/oracle-ark.wasm ../worker/.env.dev.worker1 https://rpc.testnet.near.org
-
-This creates `target/wasm32-wasip2/release/oracle_ark.wasm`.
-
-### 2.2 Create OutLayer project
+### 9.2 Create OutLayer project
 
 1. Go to https://outlayer.fastnear.com
-2. Connect your NEAR wallet
-3. Create a new project:
-   - **Name**: `oracle-ark`
-   - **Repository**: Your GitHub repo URL
-   - **Branch**: `main`
-   - **Path**: `wasi-examples/oracle-ark`
+2. Create project: name `oracle-ark`, link your GitHub repo
+3. Note your project UUID
 
-4. Deploy the project and note your:
-   - Project UUID (e.g., `p0000000000000001`)
-   - Project owner (your NEAR account)
-
-### 2.3 Create payment key
-
-In the OutLayer dashboard:
-1. Go to "Payment Keys"
-2. Create a new key
-3. Fund it with NEAR (recommended: 1-5 NEAR for testing)
-4. Copy the full payment key string: `owner.near:0:secret...`
-
-### 2.4 Configure contract to use OutLayer
+### 9.3 Configure scheduler
 
 ```bash
-near call price-oracle.testnet configure_outlayer '{
-  "outlayer_contract_id": "outlayer.testnet",
-  "code_source": "{\"Project\": {\"project_id\": \"zavodil2.testnet/price-oracle\"}}",   "secrets_profile": "default",
-  "secrets_account_id": "zavodil2.testnet"
-}' --accountId zavodil2.testnet --networkId testnet --depositYocto 1
-```
-
-Note: Omitting `version_key` uses the project's active version. To pin a specific version:
-```bash
-"code_source": "{\"Project\": {\"project_id\": \"owner/project\", \"version_key\": \"abc123\"}}"
-```
-
-
-
-### 2.5 (Optional) Enable subsidized calls
-
-By default, users calling `oracle_call` must attach 0.01+ NEAR to cover OutLayer execution.
-You can enable **subsidized mode** where the contract pays from its own balance:
-
-```bash
-# Enable subsidized OutLayer calls
-near call oracle-ark.your-account.near set_subsidize_outlayer_calls '{"enabled": true}' \
-  --accountId your-account.near --depositYocto 1
-```
-
-**Requirements for subsidized calls:**
-- `subsidize_outlayer_calls` must be enabled (see above)
-- Contract balance must be > 20 NEAR
-
-When both conditions are met, `oracle_call` works without requiring user deposit.
-The contract pays 0.02 NEAR per OutLayer call, and refunds return to the contract.
-
-```bash
-# Check if subsidization is currently active
-near view oracle-ark.your-account.near can_subsidize_outlayer_calls
-
-# Check if subsidization is enabled (regardless of balance)
-near view oracle-ark.your-account.near get_subsidize_outlayer_calls
-```
-
-## Step 3: Deploy Scheduler
-
-### 3.1 Configure environment
-
-```bash
-cd wasi-examples/oracle-ark/scheduler
+cd scheduler
 cp .env.example .env
 ```
 
-Edit `.env`:
-
+Key settings in `.env`:
 ```bash
-# Required
 COORDINATOR_URL=https://api.outlayer.fastnear.com
-PROJECT_OWNER=your-account.near
+PROJECT_OWNER=owner.near
 PROJECT_NAME=oracle-ark
-PROJECT_UUID=p0000000000000001
-PAYMENT_KEY=your-account.near:0:your-secret-key
+PAYMENT_KEY=owner.near:1:your-secret-key
 
-# Tokens config file (shared with WASI)
-# Edit ../tokens.json to add/remove tokens
-TOKENS_CONFIG=../tokens.json
-
-# Update triggers
 UPDATE_INTERVAL_SECS=60
 PRICE_DIFF_THRESHOLD_PERCENT=1.0
 
-# Optional: also update contract state
-UPDATE_CONTRACT_ENABLED=false
-ORACLE_CONTRACT_ID=oracle-ark.your-account.near
+UPDATE_CONTRACT_ENABLED=true
+ORACLE_CONTRACT_ID=price-oracle.near
 
-# Logging
-RUST_LOG=info
+SECRETS_PROFILE=default
+SECRETS_ACCOUNT_ID=owner.near
 ```
 
-The `tokens.json` file (at `oracle-ark/tokens.json`) defines which tokens to track:
-
-```json
-{
-  "wrap.near": {
-    "decimals": 24,
-    "coingecko": "near",
-    "binance": "NEARUSDT",
-    "pyth": "0xc415de8d2efa7db216527dff4b60e8f3a5311c740dadb233e13e12547e226750"
-  },
-  "usdt.tether-token.near": {
-    "decimals": 6,
-    "stablecoin": true,
-    "coingecko": "tether",
-    "pyth": "0x2b89b9dc8fdf9f34709a5b106b472f0f39bb6ca9ce04b0fd7f2e971688e2e53b"
-  }
-}
-```
-
-### 3.2 Build and run with Docker
+### 9.4 Run
 
 ```bash
-# Build image
-cd /wasi-examples/oracle-ark
 docker build -t oracle-scheduler -f scheduler/Dockerfile .
-# reset cache
-docker build --no-cache -t oracle-scheduler -f scheduler/Dockerfile .
-
-# Run container in console
-docker run --name oracle-scheduler --env-file scheduler/.env oracle-scheduler
-# Run container on a background
-docker run -d --name oracle-scheduler --restart unless-stopped --env-file .env oracle-scheduler
-
-# Remove container
-docker rm -f oracle-scheduler 2>/dev/null; 
-
+docker run -d --name oracle-scheduler --restart unless-stopped \
+  --env-file scheduler/.env oracle-scheduler
 ```
 
-Or use docker-compose:
+---
+
+## Future Upgrades (via DAO)
+
+After the initial deploy, all contract upgrades go through DAO:
 
 ```bash
-docker-compose up -d
+# 1. Upload code (attach NEAR for storage, ~1 NEAR per 100KB)
+near call price-oracle.near upload_upgrade_code \
+  --base64File target/near/price_oracle.wasm \
+  --accountId member1.near --deposit 5 --gas 300000000000000
+# Returns: code_hash (SHA-256 hex)
+
+# 2. Create upgrade proposal
+#    migrate_method: "migrate_state3" if state changed, null otherwise
+near call price-oracle.near create_proposal '{"action": {
+  "action": "upgrade_contract",
+  "code_hash": "<hash from step 1>",
+  "migrate_method": null
+}}' --accountId member1.near --deposit 0.000000000000000000000001
+
+# 3. Approve (deploys code + refunds storage deposit to uploader)
+near call price-oracle.near approve_proposal '{"id": <id>}' \
+  --accountId member2.near --deposit 0.000000000000000000000001
 ```
 
-### 3.3 View logs
+Manage pending uploads:
+```bash
+# List pending code hashes
+near view price-oracle.near get_pending_upgrade_hashes
+
+# Remove uploaded code (refunds deposit to uploader)
+near call price-oracle.near remove_pending_upgrade_code '{"code_hash": "<hash>"}' \
+  --accountId member1.near --deposit 0.000000000000000000000001
+```
+
+---
+
+## DAO Proposal Reference
+
+All available proposal actions:
+
+| Action | Description |
+|--------|-------------|
+| `add_oracle` | Register an account as oracle |
+| `remove_oracle` | Remove oracle |
+| `add_asset` | Add price asset (optional `push_signer_key`) |
+| `remove_asset` | Remove asset |
+| `add_asset_ema` | Add EMA tracking for asset |
+| `remove_asset_ema` | Remove EMA |
+| `set_push_signer_accounts` | Set allowed push accounts per asset |
+| `set_push_signer_keys` | Batch set/remove TEE keys for assets |
+| `register_push_signer` | Register TEE signer (created by `propose_register_push_signer`) |
+| `set_recency_duration_sec` | Set price staleness threshold |
+| `configure_outlayer` | Set OutLayer contract, code source, secrets |
+| `set_subsidize_outlayer_calls` | Enable/disable subsidized calls |
+| `update_near_claim_amount` | Set oracle NEAR reward amount |
+| `add_price_mapping` | Add Pyth price ID → asset mapping |
+| `remove_price_mapping` | Remove Pyth mapping |
+| `set_pyth_stale_threshold` | Set Pyth staleness threshold |
+| `add_council_member` | Add council member |
+| `remove_council_member` | Remove council member |
+| `update_owner` | Transfer ownership |
+| `upgrade_contract` | Deploy uploaded code (with optional migration) |
+| `pause` | Pause contract |
+| `unpause` | Unpause contract |
+
+---
+
+## View Methods
 
 ```bash
-docker logs -f oracle-scheduler
+near view price-oracle.near get_version
+near view price-oracle.near get_owner_id
+near view price-oracle.near get_council_members
+near view price-oracle.near get_council_threshold
+near view price-oracle.near get_proposals '{"limit": 20}'
+near view price-oracle.near get_proposal '{"id": 0}'
+near view price-oracle.near get_oracles
+near view price-oracle.near get_assets
+near view price-oracle.near get_price_data '{"asset_ids": ["wrap.near"]}'
+near view price-oracle.near get_asset_oracle_keys
+near view price-oracle.near get_push_signer_accounts '{"asset_id": "wrap.near"}'
+near view price-oracle.near get_pending_upgrade_hashes
+near view price-oracle.near can_subsidize_outlayer_calls
+near view price-oracle.near is_paused
 ```
-
-## Step 4: Verify Deployment
-
-### 4.1 Check WASI public storage
-
-```bash
-# Read cached price from WASI public storage
-curl "https://api.outlayer.fastnear.com/storage/your-account.near/oracle-ark/price:wrap.near"
-```
-
-### 4.2 Check contract prices
-
-```bash
-near view price-oracle.testnet get_price_data '{"asset_ids": ["wrap.near"]}' --networkId testnet
-```
-
-### 4.3 Test oracle_call (for DeFi integration)
-
-```bash
-# This will fetch fresh prices if needed (costs gas + OutLayer fee)
-near call oracle-ark.your-account.near oracle_call '{
-  "receiver_id": "your-defi-contract.near",
-  "asset_ids": ["wrap.near"],
-  "msg": "test"
-}' --accountId your-account.near --deposit 0.02
-```
-
-## Integration Guide for DeFi
-
-### Callback interface
-
-Your DeFi contract must implement:
-
-```rust
-pub fn oracle_on_call(&mut self, sender_id: AccountId, data: PriceData, msg: String);
-```
-
-Where `PriceData` is:
-
-```rust
-pub struct PriceData {
-    pub timestamp: u64,
-    pub recency_duration_sec: u32,
-    pub prices: Vec<AssetOptionalPrice>,
-}
-
-pub struct AssetOptionalPrice {
-    pub asset_id: String,
-    pub price: Option<Price>,
-}
-
-pub struct Price {
-    pub multiplier: u128,
-    pub decimals: u8,
-}
-```
-
-### Example integration
-
-```rust
-#[ext_contract(ext_oracle)]
-trait Oracle {
-    fn oracle_call(
-        &mut self,
-        receiver_id: AccountId,
-        asset_ids: Option<Vec<String>>,
-        msg: String,
-    ) -> Promise;
-}
-
-// In your contract:
-pub fn request_prices(&mut self) -> Promise {
-    ext_oracle::ext("oracle-ark.your-account.near".parse().unwrap())
-        .with_attached_deposit(NearToken::from_millinear(20)) // 0.02 NEAR
-        .oracle_call(
-            env::current_account_id(),
-            Some(vec!["wrap.near".to_string()]),
-            "swap".to_string(),
-        )
-}
-
-pub fn oracle_on_call(&mut self, sender_id: AccountId, data: PriceData, msg: String) {
-    // Process prices...
-    for price_info in data.prices {
-        if let Some(price) = price_info.price {
-            let usd_price = price.multiplier as f64 / 10f64.powi(price.decimals as i32);
-            // Use the price...
-        }
-    }
-}
-```
-
-## Monitoring
-
-### Scheduler health
-
-```bash
-# Check if container is running
-docker ps | grep oracle-scheduler
-
-# Check recent logs
-docker logs --tail 100 oracle-scheduler
-```
-
-### Price freshness
-
-```bash
-# Check last update timestamp
-curl -s "https://api.outlayer.fastnear.com/storage/your-account.near/oracle-ark/price:wrap.near" | jq '.timestamp'
-```
-
-### Payment key balance
-
-Monitor your payment key balance in the OutLayer dashboard. Refill when low.
-
-## Troubleshooting
-
-### Scheduler not updating
-
-1. Check logs: `docker logs oracle-scheduler`
-2. Verify payment key has funds
-3. Check COORDINATOR_URL is correct
-4. Verify TOKENS list matches contract assets
-
-### Contract returns stale prices
-
-1. Check scheduler is running
-2. Verify OutLayer deployment is active
-3. Check `recency_duration_sec` setting
-4. Ensure payment key is funded
-
-### WASI execution fails
-
-1. Check OutLayer dashboard for errors
-2. Verify code_source commit exists
-3. Check resource limits in contract call
 
 ## Costs
 
 | Component | Cost |
 |-----------|------|
 | Contract deployment | ~2 NEAR |
-| Each scheduler update | ~0.001 NEAR (via payment key) |
-| Each oracle_call (fresh, user pays) | ~0.01-0.02 NEAR (paid by caller) |
-| Each oracle_call (fresh, subsidized) | ~0.02 NEAR (paid by contract) |
-| Each oracle_call (cached) | ~0.0001 NEAR (just gas) |
-
-**Subsidized mode:** When enabled and contract has > 20 NEAR, the contract pays for OutLayer calls.
-Users can call `oracle_call` without attaching deposit. Refunds return to contract balance.
-
-## Security Notes
-
-1. **Payment key**: Store securely, rotate periodically
-2. **Owner key**: Use a multisig or DAO for production
-3. **Price sources**: WASI fetches from multiple sources and uses median
-4. **TEE verification**: All prices are generated inside Intel TDX enclave
+| Scheduler update (via payment key) | ~0.001 NEAR |
+| `oracle_call` (stale, user pays) | ~0.01-0.02 NEAR |
+| `oracle_call` (stale, subsidized) | ~0.02 NEAR (from contract) |
+| `oracle_call` (cached) | ~0.0001 NEAR (gas only) |
+| Upload upgrade code | ~1 NEAR per 100KB (refunded on deploy) |

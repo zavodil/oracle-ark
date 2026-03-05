@@ -2,12 +2,25 @@ use crate::*;
 
 pub type AssetId = String;
 
+/// Old asset format (deployed, no push_signer_accounts field).
+#[derive(BorshSerialize, BorshDeserialize)]
+#[borsh(crate = "near_sdk::borsh")]
+pub struct AssetV0 {
+    pub reports: Vec<Report>,
+    pub emas: Vec<AssetEma>,
+}
+
 #[derive(BorshSerialize, BorshDeserialize, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(crate = "near_sdk::serde")]
 #[borsh(crate = "near_sdk::borsh")]
 pub struct Asset {
     pub reports: Vec<Report>,
     pub emas: Vec<AssetEma>,
+    /// If Some, only these implicit accounts (derived from TEE keys) can push prices.
+    /// If None, any registered oracle can report.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "Option<Vec<String>>")]
+    pub push_signer_accounts: Option<Vec<AccountId>>,
 }
 
 #[derive(BorshSerialize, BorshDeserialize, Serialize, Deserialize, Clone, schemars::JsonSchema)]
@@ -39,20 +52,26 @@ pub struct AssetOptionalPrice {
 #[derive(BorshSerialize, BorshDeserialize)]
 #[borsh(crate = "near_sdk::borsh")]
 pub enum VAsset {
-    Current(Asset),
+    Current(AssetV0),
+    V1(Asset),
 }
 
 impl From<VAsset> for Asset {
     fn from(v: VAsset) -> Self {
         match v {
-            VAsset::Current(c) => c,
+            VAsset::Current(old) => Asset {
+                reports: old.reports,
+                emas: old.emas,
+                push_signer_accounts: None,
+            },
+            VAsset::V1(a) => a,
         }
     }
 }
 
 impl From<Asset> for VAsset {
-    fn from(c: Asset) -> Self {
-        VAsset::Current(c)
+    fn from(a: Asset) -> Self {
+        VAsset::V1(a)
     }
 }
 
@@ -61,6 +80,7 @@ impl Asset {
         Self {
             reports: Vec::new(),
             emas: Vec::new(),
+            push_signer_accounts: None,
         }
     }
 

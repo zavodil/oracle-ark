@@ -1,3 +1,4 @@
+mod near_tx;
 mod sources;
 mod storage_types;
 mod telegram;
@@ -27,6 +28,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 contract_id,
                 aggregation_method,
                 min_sources_num,
+                oracle_keys,
             } => {
                 let response = handle_update_prices(
                     &tokens,
@@ -34,6 +36,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     contract_id.as_deref(),
                     aggregation_method,
                     min_sources_num,
+                    oracle_keys.as_ref(),
                 );
                 serde_json::to_string(&response)?
             }
@@ -66,6 +69,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let response = handle_test_telegram(message.as_deref());
                 serde_json::to_string(&response)?
             }
+            OracleCommand::GetPublicKey { key_name } => {
+                let response = handle_get_public_key(&key_name);
+                serde_json::to_string(&response)?
+            }
         },
         Err(e) => {
             let error_response = CommandResponse {
@@ -95,9 +102,10 @@ fn current_timestamp() -> u64 {
 fn handle_update_prices(
     tokens: &[String],
     update_contract: bool,
-    _contract_id: Option<&str>,
+    contract_id: Option<&str>,
     aggregation_method: AggregationMethod,
     min_sources_num: u8,
+    oracle_keys: Option<&std::collections::HashMap<String, String>>,
 ) -> CommandResponse {
     let mut results = Vec::new();
 
@@ -142,9 +150,84 @@ fn handle_update_prices(
         }
     }
 
-    // TODO: If update_contract is true, call report_prices on contract
+    // Alert if Chainlink was disabled during this run (all RPCs failed)
+    if oracle_ark_sources::CHAINLINK_DISABLED.load(std::sync::atomic::Ordering::Relaxed) {
+        telegram::send_alert(
+            "Chainlink Disabled",
+            "All Chainlink Ethereum RPCs failed. Chainlink source disabled for this run.\nPrices still available from other sources.",
+        );
+    }
+
+    // If update_contract is true, sign and send report_prices tx to the oracle contract
     if update_contract {
-        eprintln!("Contract update requested but not yet implemented");
+        if let Some(contract_id) = contract_id {
+            // Build AssetPrice entries from successful results
+            // Contract Price format: { multiplier: u128 as string, decimals: u8 }
+            // We use decimals=8, so multiplier = price * 10^8
+            let prices_for_contract: Vec<(String, serde_json::Value)> = results.iter()
+                .filter(|r| r.price.is_some() && r.error.is_none())
+                .map(|r| {
+                    let price_f64 = r.price.unwrap();
+                    let multiplier = (price_f64 * 100_000_000.0).round() as u128;
+                    (r.token.clone(), serde_json::json!({
+                        "asset_id": r.token,
+                        "price": {
+                            "multiplier": multiplier.to_string(),
+                            "decimals": 8
+                        }
+                    }))
+                })
+                .collect();
+
+            if !prices_for_contract.is_empty() {
+                // Group prices by oracle key
+                let mut by_key: std::collections::HashMap<String, Vec<serde_json::Value>> =
+                    std::collections::HashMap::new();
+
+                if let Some(keys) = oracle_keys {
+                    // Only push assets that have explicit key assignments
+                    for (asset_id, price_json) in &prices_for_contract {
+                        if let Some(key_name) = keys.get(asset_id) {
+                            by_key.entry(key_name.clone()).or_default().push(price_json.clone());
+                        }
+                        // Assets without key mapping are warm-only (not pushed to contract)
+                    }
+                } else {
+                    // No oracle_keys provided — push all with default key
+                    let default_key = "PROTECTED_ORACLE_KEY".to_string();
+                    for (_, price_json) in &prices_for_contract {
+                        by_key.entry(default_key.clone()).or_default().push(price_json.clone());
+                    }
+                }
+
+                // Send one transaction per key
+                for (key_name, prices) in &by_key {
+                    let args = serde_json::json!({ "prices": prices });
+                    match report_prices_to_contract(contract_id, key_name, &args.to_string()) {
+                        Ok(hash) => eprintln!("Contract updated via {}: {}", key_name, hash),
+                        Err(e) => {
+                            let signer_info = env::var(key_name)
+                                .ok()
+                                .and_then(|k| near_tx::derive_implicit_account(&k).ok())
+                                .map(|(id, _)| id)
+                                .unwrap_or_else(|| "unknown".to_string());
+                            eprintln!("Contract update failed ({}): {}", key_name, e);
+                            telegram::send_alert(
+                                "Contract Update Failed",
+                                &format!(
+                                    "Contract: {}\nKey: {}\nSigner: {}\nAssets: {:?}\nError: {}\n\nIf 'account not found': fund the implicit account with ≥0.01 NEAR",
+                                    contract_id, key_name, signer_info,
+                                    prices.iter().filter_map(|p| p["asset_id"].as_str()).collect::<Vec<_>>(),
+                                    e
+                                ),
+                            );
+                        }
+                    }
+                }
+            }
+        } else {
+            eprintln!("update_contract=true but no contract_id provided");
+        }
     }
 
     let success = results.iter().all(|r| r.error.is_none());
@@ -153,6 +236,31 @@ fn handle_update_prices(
         prices: results,
         error: None,
     }
+}
+
+/// Sign and send report_prices transaction to the oracle contract
+/// Uses a PROTECTED_ key (TEE-generated) and derives implicit account from it
+fn report_prices_to_contract(contract_id: &str, key_name: &str, args: &str) -> Result<String, String> {
+    let signer_key = env::var(key_name)
+        .map_err(|_| format!("{} not set", key_name))?;
+    let rpc_url = env::var("NEAR_RPC_URL")
+        .unwrap_or_else(|_| "https://rpc.mainnet.near.org".to_string());
+
+    // Derive implicit account ID from the protected key
+    let (signer_id, _) = near_tx::derive_implicit_account(&signer_key)
+        .map_err(|e| format!("Failed to derive implicit account from {}: {}", key_name, e))?;
+
+    near_tx::call(
+        &rpc_url,
+        &signer_id,
+        &signer_key,
+        contract_id,
+        "report_prices",
+        args,
+        100_000_000_000_000, // 100 TGas
+        0,                    // no deposit
+    )
+    .map_err(|e| e.to_string())
 }
 
 /// Handle get_prices command (blockchain requests)
@@ -584,6 +692,40 @@ struct TestTelegramResponse {
     message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
+}
+
+/// Handle get_public_key command - returns implicit account ID and public key for a PROTECTED_ key
+fn handle_get_public_key(key_name: &str) -> types::PublicKeyResponse {
+    if !key_name.starts_with("PROTECTED_") {
+        return types::PublicKeyResponse {
+            success: false,
+            implicit_account_id: None,
+            public_key: None,
+            error: Some("key_name must start with PROTECTED_".to_string()),
+        };
+    }
+    match env::var(key_name) {
+        Ok(private_key) => match near_tx::derive_implicit_account(&private_key) {
+            Ok((account_id, public_key)) => types::PublicKeyResponse {
+                success: true,
+                implicit_account_id: Some(account_id),
+                public_key: Some(public_key),
+                error: None,
+            },
+            Err(e) => types::PublicKeyResponse {
+                success: false,
+                implicit_account_id: None,
+                public_key: None,
+                error: Some(format!("Key derivation failed: {}", e)),
+            },
+        },
+        Err(_) => types::PublicKeyResponse {
+            success: false,
+            implicit_account_id: None,
+            public_key: None,
+            error: Some(format!("{} not found in environment", key_name)),
+        },
+    }
 }
 
 /// Handle test_telegram command - sends a test message to configured Telegram chat

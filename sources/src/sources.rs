@@ -22,6 +22,7 @@ fn current_timestamp() -> u64 {
 #[cfg(feature = "wasi")]
 pub mod sync {
     use super::*;
+    use crate::{LAST_CHAINLINK_RPC, CHAINLINK_DISABLED};
     use std::time::Duration;
     use wasi_http_client::Client;
 
@@ -122,6 +123,78 @@ pub mod sync {
             price,
             timestamp: publish_time,
         })
+    }
+
+    /// Try a single Chainlink RPC, returns Ok(price) or Err
+    fn try_chainlink_rpc(rpc_url: &str, body_str: &str) -> Result<f64> {
+        let response = Client::new()
+            .post(rpc_url)
+            .header("Content-Type", "application/json")
+            .connect_timeout(Duration::from_secs(10))
+            .body(body_str.as_bytes())
+            .send()
+            .map_err(|e| anyhow::anyhow!("{}: {}", rpc_url, e))?;
+
+        let status = response.status();
+        if status < 200 || status >= 300 {
+            anyhow::bail!("{}: HTTP {}", rpc_url, status);
+        }
+
+        let json: serde_json::Value = serde_json::from_slice(&response.body()?)
+            .map_err(|e| anyhow::anyhow!("{}: parse error: {}", rpc_url, e))?;
+
+        if let Some(error) = json.get("error") {
+            anyhow::bail!("{}: RPC error: {}", rpc_url, error);
+        }
+
+        parsers::parse_chainlink(&json)
+    }
+
+    pub fn fetch_chainlink(feed_address: &str) -> Result<SourcePrice> {
+        if CHAINLINK_DISABLED.load(std::sync::atomic::Ordering::Relaxed) {
+            anyhow::bail!("Chainlink disabled (all RPCs failed)");
+        }
+
+        let body = parsers::chainlink_request_body(feed_address);
+        let body_str = serde_json::to_string(&body)?;
+
+        // Start from the last working RPC index
+        let last_idx = LAST_CHAINLINK_RPC.load(std::sync::atomic::Ordering::Relaxed);
+
+        // Build order: start from last_idx, then cycle through the rest
+        let rpcs = parsers::CHAINLINK_RPC_URLS;
+        let n = rpcs.len();
+        let mut errors = Vec::new();
+
+        for i in 0..n {
+            let idx = (last_idx + i) % n;
+            let rpc_url = rpcs[idx];
+
+            match try_chainlink_rpc(rpc_url, &body_str) {
+                Ok(price) => {
+                    // Save working RPC index
+                    LAST_CHAINLINK_RPC.store(idx, std::sync::atomic::Ordering::Relaxed);
+                    return Ok(SourcePrice {
+                        source_name: "chainlink".to_string(),
+                        price,
+                        timestamp: current_timestamp(),
+                    });
+                }
+                Err(e) => {
+                    eprintln!("Chainlink RPC failed: {}", e);
+                    errors.push(e.to_string());
+                }
+            }
+        }
+
+        // All RPCs failed — disable Chainlink for this run
+        CHAINLINK_DISABLED.store(true, std::sync::atomic::Ordering::Relaxed);
+
+        anyhow::bail!(
+            "All {} Chainlink RPCs failed: {}",
+            n,
+            errors.join("; ")
+        )
     }
 
     pub fn fetch_huobi(symbol: &str) -> Result<SourcePrice> {
@@ -258,6 +331,13 @@ pub mod sync {
         // Pyth
         if let Some(price_id) = token_map::get_pyth_id(token) {
             if let Ok(p) = fetch_pyth(price_id) {
+                prices.push(p);
+            }
+        }
+
+        // Chainlink (Ethereum on-chain oracle)
+        if let Some(feed_address) = token_map::get_chainlink_address(token) {
+            if let Ok(p) = fetch_chainlink(feed_address) {
                 prices.push(p);
             }
         }
@@ -401,6 +481,79 @@ pub mod r#async {
         })
     }
 
+    /// Try a single Chainlink RPC (async)
+    async fn try_chainlink_rpc_async(
+        client: &reqwest::Client,
+        rpc_url: &str,
+        body: &serde_json::Value,
+    ) -> Result<f64> {
+        let response = client
+            .post(rpc_url)
+            .json(body)
+            .timeout(std::time::Duration::from_secs(10))
+            .send()
+            .await
+            .map_err(|e| anyhow::anyhow!("{}: {}", rpc_url, e))?;
+
+        if !response.status().is_success() {
+            anyhow::bail!("{}: HTTP {}", rpc_url, response.status());
+        }
+
+        let json: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| anyhow::anyhow!("{}: parse error: {}", rpc_url, e))?;
+
+        if let Some(error) = json.get("error") {
+            anyhow::bail!("{}: RPC error: {}", rpc_url, error);
+        }
+
+        parsers::parse_chainlink(&json)
+    }
+
+    pub async fn fetch_chainlink(client: &reqwest::Client, feed_address: &str) -> Result<SourcePrice> {
+        use crate::{CHAINLINK_DISABLED, LAST_CHAINLINK_RPC};
+        use std::sync::atomic::Ordering;
+
+        if CHAINLINK_DISABLED.load(Ordering::Relaxed) {
+            anyhow::bail!("Chainlink disabled (all RPCs failed)");
+        }
+
+        let body = parsers::chainlink_request_body(feed_address);
+        let last_idx = LAST_CHAINLINK_RPC.load(Ordering::Relaxed);
+        let rpcs = parsers::CHAINLINK_RPC_URLS;
+        let n = rpcs.len();
+        let mut errors = Vec::new();
+
+        for i in 0..n {
+            let idx = (last_idx + i) % n;
+            let rpc_url = rpcs[idx];
+
+            match try_chainlink_rpc_async(client, rpc_url, &body).await {
+                Ok(price) => {
+                    LAST_CHAINLINK_RPC.store(idx, Ordering::Relaxed);
+                    return Ok(SourcePrice {
+                        source_name: "chainlink".to_string(),
+                        price,
+                        timestamp: current_timestamp(),
+                    });
+                }
+                Err(e) => {
+                    eprintln!("Chainlink RPC failed: {}", e);
+                    errors.push(e.to_string());
+                }
+            }
+        }
+
+        CHAINLINK_DISABLED.store(true, Ordering::Relaxed);
+
+        anyhow::bail!(
+            "All {} Chainlink RPCs failed: {}",
+            n,
+            errors.join("; ")
+        )
+    }
+
     pub async fn fetch_huobi(client: &reqwest::Client, symbol: &str) -> Result<SourcePrice> {
         let url = parsers::huobi_url(symbol);
         let response = client.get(&url).send().await?;
@@ -512,6 +665,13 @@ pub mod r#async {
         // Pyth
         if let Some(price_id) = token_map::get_pyth_id(token) {
             if let Ok(p) = fetch_pyth(client, price_id).await {
+                prices.push(p);
+            }
+        }
+
+        // Chainlink (Ethereum on-chain oracle)
+        if let Some(feed_address) = token_map::get_chainlink_address(token) {
+            if let Ok(p) = fetch_chainlink(client, feed_address).await {
                 prices.push(p);
             }
         }

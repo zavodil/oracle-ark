@@ -21,6 +21,7 @@ pub struct TokenConfig {
     pub kucoin: Option<String>,
     pub gate: Option<String>,
     pub pyth: Option<String>,
+    pub chainlink: Option<String>,
 }
 
 /// Embedded tokens.json at compile time

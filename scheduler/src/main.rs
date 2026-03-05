@@ -227,7 +227,7 @@ async fn main() -> Result<()> {
     // Cached exchange configs from public storage, refreshed every hour
     let mut exchange_configs_cache: Option<HashMap<String, ExchangeConfig>> = None;
     let mut exchange_configs_fetched_at: Option<Instant> = None;
-    const EXCHANGE_CONFIGS_CACHE_TTL: Duration = Duration::from_secs(3600); // 1 hour
+    const EXCHANGE_CONFIGS_CACHE_TTL: Duration = Duration::from_secs(600); // 10 minutes
 
     // Cached oracle key mapping from contract (asset_id -> key_env_name), refreshed every hour
     let mut oracle_keys_cache: Option<HashMap<String, String>> = None;
@@ -239,6 +239,7 @@ async fn main() -> Result<()> {
 
     // Balance check for oracle signer (every 5 minutes)
     let mut contract_update_paused = false;
+    let mut balance_alert_sent = false;
     let mut balance_check_at: Option<Instant> = None;
     const BALANCE_CHECK_INTERVAL: Duration = Duration::from_secs(300);
 
@@ -357,16 +358,19 @@ async fn main() -> Result<()> {
                                         "Oracle signer {} balance {:.4} NEAR < min {:.4}",
                                         signer_account, balance, config.oracle_min_balance_near
                                     );
-                                    alert_throttle.send(
-                                        &client,
-                                        config.telegram_bot_token.as_deref(),
-                                        config.telegram_chat_id.as_deref(),
-                                        "Oracle Balance Low",
-                                        &format!(
-                                            "Account: {}\nBalance: {:.4} NEAR\nMinimum: {:.4} NEAR\n\nContract updates paused. Fund the account to resume.",
-                                            signer_account, balance, config.oracle_min_balance_near
-                                        ),
-                                    ).await;
+                                    if !balance_alert_sent {
+                                        balance_alert_sent = true;
+                                        telegram::send_alert(
+                                            &client,
+                                            config.telegram_bot_token.as_deref(),
+                                            config.telegram_chat_id.as_deref(),
+                                            "Oracle Balance Low",
+                                            &format!(
+                                                "Account: {}\nBalance: {:.4} NEAR\nMinimum: {:.4} NEAR\n\nContract updates paused. Fund the account to resume.",
+                                                signer_account, balance, config.oracle_min_balance_near
+                                            ),
+                                        ).await;
+                                    }
                                 }
                             }
                             Err(e) => {
@@ -378,6 +382,7 @@ async fn main() -> Result<()> {
                     contract_update_paused = any_low;
                     if !contract_update_paused && was_paused {
                         info!("Oracle signer balances restored, resuming contract updates");
+                        balance_alert_sent = false;
                     }
                     balance_check_at = Some(Instant::now());
                 }

@@ -37,8 +37,17 @@ struct Config {
     /// Payment key for WASI calls (format: owner:nonce:secret)
     payment_key: String,
 
-    /// Update interval in seconds (time-based trigger)
+    /// Update interval in seconds for normal assets (time-based trigger)
     update_interval_secs: u64,
+
+    /// Update interval for priority assets (NEAR, BTC, ETH) — default: same as update_interval
+    update_interval_priority_secs: u64,
+
+    /// Update interval for stablecoins — default: 300s
+    update_interval_stablecoin_secs: u64,
+
+    /// Priority asset IDs (updated more frequently)
+    priority_assets: Vec<String>,
 
     /// Price difference threshold percentage (price-based trigger)
     price_diff_threshold_percent: f64,
@@ -91,6 +100,25 @@ impl Config {
                 .unwrap_or_else(|_| "60".to_string())
                 .parse()
                 .unwrap_or(60),
+            update_interval_priority_secs: env::var("UPDATE_INTERVAL_PRIORITY_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or_else(|| {
+                    env::var("UPDATE_INTERVAL_SECS")
+                        .ok()
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(60)
+                }),
+            update_interval_stablecoin_secs: env::var("UPDATE_INTERVAL_STABLECOIN_SECS")
+                .unwrap_or_else(|_| "300".to_string())
+                .parse()
+                .unwrap_or(300),
+            priority_assets: env::var("PRIORITY_ASSETS")
+                .unwrap_or_else(|_| "wrap.near,nbtc.bridge.near,aurora".to_string())
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect(),
             price_diff_threshold_percent: env::var("PRICE_DIFF_THRESHOLD_PERCENT")
                 .unwrap_or_else(|_| "1.0".to_string())
                 .parse()
@@ -184,9 +212,13 @@ async fn main() -> Result<()> {
     info!("Project: {}/{}", config.project_owner, config.project_name);
     info!("Exchange configs: loaded from public storage (config:assets)");
     info!(
-        "Update interval: {}s, threshold: {}%",
-        config.update_interval_secs, config.price_diff_threshold_percent
+        "Update intervals: priority={}s, normal={}s, stablecoin={}s, threshold={}%",
+        config.update_interval_priority_secs,
+        config.update_interval_secs,
+        config.update_interval_stablecoin_secs,
+        config.price_diff_threshold_percent
     );
+    info!("Priority assets: {:?}", config.priority_assets);
     info!("Update contract: {}", config.update_contract_enabled);
     if let Some(ref contract_id) = config.oracle_contract_id {
         info!("Contract asset source: {} (via {})", contract_id, config.near_rpc_url);
@@ -601,6 +633,25 @@ async fn fetch_exchange_configs(
     Ok(configs)
 }
 
+/// Get update interval for a token based on its priority tier.
+fn token_update_interval(
+    config: &Config,
+    exchange_configs: &HashMap<String, ExchangeConfig>,
+    token: &str,
+) -> u64 {
+    if config.priority_assets.iter().any(|a| a == token) {
+        config.update_interval_priority_secs
+    } else if exchange_configs
+        .get(token)
+        .map(|c| c.stablecoin)
+        .unwrap_or(false)
+    {
+        config.update_interval_stablecoin_secs
+    } else {
+        config.update_interval_secs
+    }
+}
+
 async fn poll_and_update(
     client: &reqwest::Client,
     config: &Config,
@@ -680,7 +731,8 @@ async fn poll_and_update(
             .map(|t| t.elapsed().as_secs())
             .unwrap_or(u64::MAX);
 
-        let time_trigger = time_since_last >= config.update_interval_secs;
+        let interval = token_update_interval(config, exchange_configs, token);
+        let time_trigger = time_since_last >= interval;
 
         let price_trigger = match stored_price {
             Some(stored) => {

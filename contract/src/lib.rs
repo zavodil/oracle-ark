@@ -1,7 +1,9 @@
 mod asset;
+mod council;
 mod ema;
 mod oracle;
 mod owner;
+mod pyth;
 mod upgrade;
 mod utils;
 
@@ -10,6 +12,7 @@ pub use crate::ema::*;
 pub use crate::oracle::*;
 pub use crate::utils::*;
 
+use near_sdk::assert_one_yocto;
 use near_sdk::borsh::{BorshDeserialize, BorshSerialize};
 use near_sdk::collections::UnorderedMap;
 use near_sdk::json_types::U128;
@@ -52,6 +55,12 @@ pub type DurationSec = u32;
 enum StorageKey {
     Oracles,
     Assets,
+    PythPriceIdToAsset,
+    PythAssetToPriceId,
+    Proposals,
+    AssetOracleKeys,
+    PendingUpgradeCodes,
+    AssetExchangeConfigs,
 }
 
 impl IntoStorageKey for StorageKey {
@@ -203,6 +212,14 @@ trait ExtSelf {
         &mut self,
         #[callback_result] result: Result<Option<WasiCustomDataResponse>, PromiseError>,
     ) -> Vec<CustomDataResult>;
+
+    fn on_push_signer_resolved(
+        &mut self,
+        proposer: AccountId,
+        push_signer_key: String,
+        asset_ids: Vec<AssetId>,
+        #[callback_result] result: Result<Option<WasiPublicKeyResponse>, PromiseError>,
+    );
 }
 
 /// Price source for external (non-whitelisted) token queries
@@ -295,6 +312,19 @@ pub struct WasiPriceResult {
     pub error: Option<String>,
 }
 
+/// Response from WASI get_public_key command
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(crate = "near_sdk::serde")]
+pub struct WasiPublicKeyResponse {
+    pub success: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub implicit_account_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub public_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
 /// WASI response for custom_call
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(crate = "near_sdk::serde")]
@@ -347,6 +377,43 @@ pub struct Contract {
 
     /// OutLayer secrets account ID (e.g., "zavodil2.testnet")
     pub secrets_account_id: Option<AccountId>,
+
+    /// Pyth: PriceIdentifier (64-char hex) -> Oracle-Ark asset_id
+    pub pyth_price_id_to_asset: UnorderedMap<String, String>,
+
+    /// Pyth: Oracle-Ark asset_id -> PriceIdentifier (64-char hex)
+    pub pyth_asset_to_price_id: UnorderedMap<String, String>,
+
+    /// Pyth: staleness threshold in seconds (default 60)
+    pub pyth_stale_threshold: u64,
+
+    /// Council members who can create and vote on proposals
+    pub council_members: Vec<AccountId>,
+
+    /// Minimum votes needed to approve a proposal
+    pub council_threshold: u32,
+
+    /// Proposal storage
+    pub proposals: UnorderedMap<u64, council::VProposal>,
+
+    /// Auto-incrementing proposal ID
+    pub next_proposal_id: u64,
+
+    /// If true, state-mutating methods are blocked (except unpause via council)
+    pub paused: bool,
+
+    /// Per-asset oracle key env var name mapping (asset_id -> PROTECTED_ env var name)
+    /// Used by WASI/scheduler to know which TEE key to use for signing report_prices
+    pub asset_oracle_keys: UnorderedMap<AssetId, String>,
+
+    /// WASM code blobs waiting to be deployed via DAO upgrade proposals.
+    /// Keyed by SHA-256 hex hash. Stores code + uploader + deposit for refund.
+    pub pending_upgrade_codes: UnorderedMap<String, upgrade::PendingUpgrade>,
+
+    /// Per-asset exchange config stored as opaque JSON strings.
+    /// Managed via DAO proposals, synced to WASI public storage.
+    /// Contract does not parse these — WASI/scheduler parse at runtime.
+    pub asset_exchange_configs: UnorderedMap<AssetId, String>,
 }
 
 #[derive(Serialize, Deserialize, schemars::JsonSchema)]
@@ -379,30 +446,18 @@ impl Contract {
             subsidize_outlayer_calls: false,
             secrets_profile: None,
             secrets_account_id: None,
+            pyth_price_id_to_asset: UnorderedMap::new(StorageKey::PythPriceIdToAsset),
+            pyth_asset_to_price_id: UnorderedMap::new(StorageKey::PythAssetToPriceId),
+            pyth_stale_threshold: 60,
+            council_members: vec![],
+            council_threshold: 1,
+            proposals: UnorderedMap::new(StorageKey::Proposals),
+            next_proposal_id: 0,
+            paused: false,
+            asset_oracle_keys: UnorderedMap::new(StorageKey::AssetOracleKeys),
+            pending_upgrade_codes: UnorderedMap::new(StorageKey::PendingUpgradeCodes),
+            asset_exchange_configs: UnorderedMap::new(StorageKey::AssetExchangeConfigs),
         }
-    }
-
-    /// Configure OutLayer integration (owner only)
-    ///
-    /// # Arguments
-    /// * `outlayer_contract_id` - OutLayer contract (e.g., "outlayer.near")
-    /// * `code_source` - JSON string with ExecutionSource (Project, GitHub, or WasmUrl)
-    /// * `secrets_profile` - Optional secrets profile name (e.g., "default")
-    /// * `secrets_account_id` - Optional account ID for secrets (required with secrets_profile)
-    #[payable]
-    pub fn configure_outlayer(
-        &mut self,
-        outlayer_contract_id: AccountId,
-        code_source: String,
-        secrets_profile: Option<String>,
-        secrets_account_id: Option<AccountId>,
-    ) {
-        self.assert_owner();
-        self.outlayer_contract_id = Some(outlayer_contract_id);
-        self.outlayer_code_source = Some(code_source);
-        self.secrets_profile = secrets_profile;
-        self.secrets_account_id = secrets_account_id;
-        log!("OutLayer configured");
     }
 
     /// Remove price data from removed oracle.
@@ -520,6 +575,7 @@ impl Contract {
     }
 
     pub fn report_prices(&mut self, prices: Vec<AssetPrice>, claim_near: Option<bool>) {
+        self.assert_not_paused();
         assert!(!prices.is_empty());
         let oracle_id = env::predecessor_account_id();
         let timestamp = env::block_timestamp();
@@ -546,6 +602,14 @@ impl Contract {
         for AssetPrice { asset_id, price } in prices {
             price.assert_valid();
             if let Some(mut asset) = self.internal_get_asset(&asset_id) {
+                if let Some(ref allowed) = asset.push_signer_accounts {
+                    assert!(
+                        allowed.contains(&oracle_id),
+                        "Account {} not allowed to push prices for asset {}",
+                        oracle_id,
+                        asset_id
+                    );
+                }
                 asset.remove_report(&oracle_id);
                 asset.add_report(Report {
                     oracle_id: oracle_id.clone(),
@@ -596,6 +660,7 @@ impl Contract {
         msg: String,
         resource_limits: Option<ResourceLimits>,
     ) -> Promise {
+        self.assert_not_paused();
         let sender_id = env::predecessor_account_id();
         let attached = env::attached_deposit();
 
@@ -782,6 +847,124 @@ impl Contract {
                     .with_static_gas(GAS_FOR_CALLBACK)
                     .on_request_custom_data_result(),
             )
+    }
+
+    /// Propose registering a TEE push signer. Calls OutLayer WASI to resolve
+    /// the PROTECTED_ key into an implicit account, then creates a proposal
+    /// for council to vote on.
+    ///
+    /// # Arguments
+    /// * `push_signer_key` - TEE secret name (e.g., "PROTECTED_KEY_RHEA")
+    /// * `asset_ids` - Assets this signer should push prices for
+    /// * `secrets_profile` - Secrets profile name (e.g., "default")
+    /// * `secrets_account_id` - Owner of the TEE secret
+    #[payable]
+    pub fn propose_register_push_signer(
+        &mut self,
+        push_signer_key: String,
+        asset_ids: Vec<AssetId>,
+        secrets_profile: String,
+        secrets_account_id: AccountId,
+    ) -> Promise {
+        assert_one_yocto();
+        let caller = env::predecessor_account_id();
+        self.assert_council_member(&caller);
+        assert!(
+            push_signer_key.starts_with("PROTECTED_"),
+            "push_signer_key must start with PROTECTED_"
+        );
+        assert!(!asset_ids.is_empty(), "asset_ids cannot be empty");
+
+        // Verify all assets exist
+        for asset_id in &asset_ids {
+            assert!(
+                self.internal_get_asset(asset_id).is_some(),
+                "Asset not found: {}",
+                asset_id
+            );
+        }
+
+        // Build WASI input to resolve the key
+        let input_data = serde_json::json!({
+            "command": "get_public_key",
+            "key_name": push_signer_key
+        })
+        .to_string();
+
+        // Build secrets_ref for the specified secret owner and profile
+        let secrets_ref = Some(serde_json::json!({
+            "profile": secrets_profile,
+            "account_id": secrets_account_id
+        }));
+
+        let outlayer_contract_id = self
+            .outlayer_contract_id
+            .clone()
+            .expect("OutLayer not configured");
+        let code_source_str = self
+            .outlayer_code_source
+            .clone()
+            .expect("OutLayer code source not configured");
+        let execution_source: ExecutionSource =
+            serde_json::from_str(&code_source_str).expect("Invalid code source JSON");
+
+        // Contract pays for the OutLayer call
+        let deposit = NearToken::from_yoctonear(SUBSIDIZED_OUTLAYER_DEPOSIT);
+
+        ext_outlayer::ext(outlayer_contract_id)
+            .with_attached_deposit(deposit)
+            .with_unused_gas_weight(1)
+            .request_execution(
+                execution_source,
+                Some(ResourceLimits::default()),
+                Some(input_data),
+                secrets_ref,
+                Some(ResponseFormat::Json),
+                None,
+                None,
+            )
+            .then(
+                ext_self::ext(env::current_account_id())
+                    .with_static_gas(GAS_FOR_CALLBACK)
+                    .on_push_signer_resolved(caller, push_signer_key, asset_ids),
+            )
+    }
+
+    /// Callback: OutLayer resolved the PROTECTED_ key → create council proposal
+    #[private]
+    pub fn on_push_signer_resolved(
+        &mut self,
+        proposer: AccountId,
+        push_signer_key: String,
+        asset_ids: Vec<AssetId>,
+        #[callback_result] result: Result<Option<WasiPublicKeyResponse>, PromiseError>,
+    ) {
+        let response = match result {
+            Ok(Some(r)) => r,
+            Ok(None) => env::panic_str("OutLayer returned no data"),
+            Err(e) => env::panic_str(&format!("OutLayer call failed: {:?}", e)),
+        };
+
+        assert!(
+            response.success,
+            "get_public_key failed: {}",
+            response.error.unwrap_or_default()
+        );
+
+        let signer_account_id: AccountId = response
+            .implicit_account_id
+            .expect("Missing implicit_account_id")
+            .parse()
+            .expect("Invalid implicit account ID");
+
+        let action = council::ProposalAction::RegisterPushSigner {
+            push_signer_key,
+            signer_account_id,
+            asset_ids,
+        };
+
+        let id = self.internal_create_proposal(proposer, action);
+        log!("Push signer proposal #{} created (resolved from TEE)", id);
     }
 
     /// Callback to handle custom_call result
@@ -1026,6 +1209,68 @@ impl Contract {
                 }
             }
         }
+    }
+
+    /// Sync all exchange configs to WASI public storage via OutLayer.
+    /// Caller pays for OutLayer execution. Anyone can call (idempotent).
+    #[payable]
+    pub fn sync_asset_configs(&mut self) {
+        let attached = env::attached_deposit();
+
+        let outlayer_contract_id = self
+            .outlayer_contract_id
+            .clone()
+            .expect("OutLayer not configured");
+        let code_source_str = self
+            .outlayer_code_source
+            .clone()
+            .expect("OutLayer code source not configured");
+
+        // Check deposit: subsidized or caller-paid
+        let contract_balance = env::account_balance().as_yoctonear();
+        let can_subsidize =
+            self.subsidize_outlayer_calls && contract_balance > MIN_BALANCE_FOR_SUBSIDY;
+
+        let (outlayer_deposit, payer_account_id) = if can_subsidize {
+            (
+                NearToken::from_yoctonear(SUBSIDIZED_OUTLAYER_DEPOSIT),
+                None,
+            )
+        } else {
+            assert!(
+                attached.as_yoctonear() >= MIN_OUTLAYER_DEPOSIT,
+                "Requires at least 0.01 NEAR for OutLayer execution"
+            );
+            (attached, Some(env::predecessor_account_id()))
+        };
+
+        // Pass raw config strings to WASI — contract doesn't parse JSON.
+        // WASI will deserialize and validate on its side.
+        let configs_map: std::collections::HashMap<String, String> =
+            self.asset_exchange_configs.iter().collect();
+
+        let input_data = serde_json::json!({
+            "command": "sync_asset_configs",
+            "configs": configs_map
+        })
+        .to_string();
+
+        let execution_source: ExecutionSource =
+            serde_json::from_str(&code_source_str).expect("Invalid code source JSON");
+        let secrets_ref = self.build_secrets_ref();
+
+        ext_outlayer::ext(outlayer_contract_id)
+            .with_attached_deposit(outlayer_deposit)
+            .with_unused_gas_weight(1)
+            .request_execution(
+                execution_source,
+                Some(ResourceLimits::default()),
+                Some(input_data),
+                secrets_ref,
+                Some(ResponseFormat::Text),
+                payer_account_id,
+                None,
+            );
     }
 
     /// Build secrets_ref JSON for OutLayer if both profile and account_id are configured

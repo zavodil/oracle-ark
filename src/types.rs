@@ -61,6 +61,12 @@ pub enum OracleCommand {
         /// Minimum number of sources required (default: 1)
         #[serde(default = "default_min_sources")]
         min_sources_num: u8,
+        /// Per-asset oracle key mapping: asset_id -> PROTECTED_ env var name
+        /// E.g., {"wrap.near": "PROTECTED_ORACLE_KEY_A", "usdt.tether-token.near": "PROTECTED_ORACLE_KEY_B"}
+        /// Assets not in this map use the default PROTECTED_ORACLE_KEY
+        /// If omitted, all assets use PROTECTED_ORACLE_KEY
+        #[serde(default)]
+        oracle_keys: Option<std::collections::HashMap<String, String>>,
     },
 
     /// Get prices (for blockchain requests via yield/resume)
@@ -116,6 +122,22 @@ pub enum OracleCommand {
         /// Optional custom message to send
         #[serde(default)]
         message: Option<String>,
+    },
+
+    /// Get public key and implicit account ID for a PROTECTED_ key
+    /// Used by DAO to verify TEE worker identity before registering as oracle
+    GetPublicKey {
+        /// Environment variable name (default: "PROTECTED_ORACLE_KEY")
+        #[serde(default = "default_oracle_key_name")]
+        key_name: String,
+    },
+
+    /// Sync asset exchange configs to public storage.
+    /// Called by the oracle contract after DAO config updates.
+    /// WASI stores the full config map in public storage key "config:assets".
+    SyncAssetConfigs {
+        /// Full config map: asset_id -> exchange config JSON string
+        configs: std::collections::HashMap<String, String>,
     },
 }
 
@@ -214,6 +236,10 @@ pub struct CustomSourceConfig {
     pub body: Option<serde_json::Value>,
 }
 
+fn default_oracle_key_name() -> String {
+    "PROTECTED_ORACLE_KEY".to_string()
+}
+
 fn default_value_type() -> String {
     "number".to_string()
 }
@@ -252,6 +278,29 @@ pub struct CustomDataResult {
     pub value: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timestamp: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Response for sync_asset_configs command
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SyncResponse {
+    pub success: bool,
+    pub count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Response for get_public_key command
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PublicKeyResponse {
+    pub success: bool,
+    /// NEAR implicit account ID (hex-encoded ed25519 public key, 64 chars)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub implicit_account_id: Option<String>,
+    /// Public key in NEAR format (ed25519:base58...)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub public_key: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }

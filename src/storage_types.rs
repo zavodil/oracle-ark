@@ -17,6 +17,10 @@ pub struct StoredPrice {
 
     /// Aggregation method used ("average", "median", "weighted_avg")
     pub aggregation_method: String,
+
+    /// Unix timestamp of last successful report_prices to contract (seconds)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_contract_report: Option<u64>,
 }
 
 /// Information about a single price source
@@ -46,6 +50,7 @@ impl StoredPrice {
             timestamp,
             sources,
             aggregation_method: aggregation_method.to_string(),
+            last_contract_report: None,
         }
     }
 

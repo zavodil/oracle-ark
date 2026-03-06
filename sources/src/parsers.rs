@@ -115,6 +115,62 @@ pub fn parse_pyth(json: &Value) -> Result<(f64, u64)> {
     Ok((price, publish_time))
 }
 
+/// Ethereum RPC endpoints for Chainlink price feeds (tried in order, starting from last working)
+pub const CHAINLINK_RPC_URLS: &[&str] = &[
+    "https://eth.drpc.org",
+    "https://rpc.mevblocker.io",
+    "https://ethereum-rpc.publicnode.com",
+    "https://eth.llamarpc.com",
+    "https://0xrpc.io/eth",
+    "https://ethereum-public.nodies.app",
+    "https://mainnet.gateway.tenderly.co",
+    "https://eth.api.onfinality.io/public",
+    "https://ethereum.rpc.subquery.network/public",
+];
+
+/// Build Chainlink eth_call JSON-RPC request body
+/// Calls latestAnswer() (selector 0x50d25bcd) on the price feed contract
+pub fn chainlink_request_body(feed_address: &str) -> Value {
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "eth_call",
+        "params": [
+            {
+                "to": feed_address,
+                "data": "0x50d25bcd"
+            },
+            "latest"
+        ]
+    })
+}
+
+/// Parse Chainlink eth_call response: hex-encoded int256, 8 decimals
+pub fn parse_chainlink(json: &Value) -> Result<f64> {
+    let hex_result = json
+        .get("result")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("No result in Chainlink response"))?;
+
+    // Strip 0x prefix and parse hex to u128
+    let hex_str = hex_result.trim_start_matches("0x");
+    if hex_str.is_empty() || hex_str == "0" {
+        return Err(anyhow!("Chainlink returned zero price"));
+    }
+
+    let raw_value = u128::from_str_radix(hex_str, 16)
+        .map_err(|e| anyhow!("Failed to parse Chainlink hex value: {}", e))?;
+
+    // Chainlink price feeds use 8 decimals
+    let price = raw_value as f64 / 100_000_000.0;
+
+    if price <= 0.0 {
+        return Err(anyhow!("Chainlink returned non-positive price"));
+    }
+
+    Ok(price)
+}
+
 /// Build Huobi API URL
 pub fn huobi_url(symbol: &str) -> String {
     format!("https://api.huobi.pro/market/detail/merged?symbol={}", symbol)

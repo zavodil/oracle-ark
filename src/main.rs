@@ -1,14 +1,16 @@
+mod near_tx;
 mod sources;
 mod storage_types;
 mod telegram;
-mod tokens;
 mod types;
 
 use oracle_ark_sources::parsers;
 use oracle_ark_sources::sources::sync as shared_sources;
+use oracle_ark_sources::ExchangeConfig;
 use outlayer::storage;
 use storage_types::{SourceInfo, StoredPrice};
 use types::*;
+use std::collections::HashMap;
 use std::env;
 use std::io::{self, Read, Write};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -27,6 +29,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 contract_id,
                 aggregation_method,
                 min_sources_num,
+                oracle_keys,
             } => {
                 let response = handle_update_prices(
                     &tokens,
@@ -34,6 +37,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     contract_id.as_deref(),
                     aggregation_method,
                     min_sources_num,
+                    oracle_keys.as_ref(),
                 );
                 serde_json::to_string(&response)?
             }
@@ -66,6 +70,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let response = handle_test_telegram(message.as_deref());
                 serde_json::to_string(&response)?
             }
+            OracleCommand::GetPublicKey { key_name } => {
+                let response = handle_get_public_key(&key_name);
+                serde_json::to_string(&response)?
+            }
+            OracleCommand::SyncAssetConfigs { configs } => {
+                let response = handle_sync_asset_configs(&configs);
+                serde_json::to_string(&response)?
+            }
         },
         Err(e) => {
             let error_response = CommandResponse {
@@ -90,35 +102,106 @@ fn current_timestamp() -> u64 {
         .unwrap_or(0)
 }
 
+/// Load exchange configs from WASI public storage (key: "config:assets").
+/// These configs are synced from the oracle contract via DAO proposals.
+fn load_exchange_configs() -> Result<HashMap<String, ExchangeConfig>, String> {
+    match storage::get_worker("config:assets") {
+        Ok(Some(data)) => serde_json::from_slice(&data)
+            .map_err(|e| format!("config:assets parse error: {}", e)),
+        Ok(None) => Err(
+            "config:assets not found in storage. Call sync_asset_configs on the contract first."
+                .to_string(),
+        ),
+        Err(e) => Err(format!("Storage error reading config:assets: {}", e)),
+    }
+}
+
+/// Handle sync_asset_configs command — stores exchange configs in public storage.
+/// Contract passes raw JSON strings; WASI parses and validates them here.
+fn handle_sync_asset_configs(
+    configs: &HashMap<String, String>,
+) -> SyncResponse {
+    // Parse each config string into a JSON Value, skip malformed entries
+    let mut parsed: HashMap<String, serde_json::Value> = HashMap::new();
+    for (asset_id, config_str) in configs {
+        match serde_json::from_str::<serde_json::Value>(config_str) {
+            Ok(val) => { parsed.insert(asset_id.clone(), val); }
+            Err(e) => {
+                eprintln!("WARNING: skipping malformed config for {}: {}", asset_id, e);
+            }
+        }
+    }
+
+    let json = match serde_json::to_vec(&parsed) {
+        Ok(j) => j,
+        Err(e) => {
+            return SyncResponse {
+                success: false,
+                count: 0,
+                error: Some(format!("Failed to serialize configs: {}", e)),
+            };
+        }
+    };
+
+    match storage::set_worker_with_options("config:assets", &json, Some(false)) {
+        Ok(_) => SyncResponse {
+            success: true,
+            count: parsed.len(),
+            error: None,
+        },
+        Err(e) => SyncResponse {
+            success: false,
+            count: 0,
+            error: Some(format!("Failed to store config:assets: {}", e)),
+        },
+    }
+}
+
 /// Handle update_prices command (triggered by scheduler)
 /// Fetches prices from sources IN TEE and stores in public storage
 fn handle_update_prices(
     tokens: &[String],
     update_contract: bool,
-    _contract_id: Option<&str>,
+    contract_id: Option<&str>,
     aggregation_method: AggregationMethod,
     min_sources_num: u8,
+    oracle_keys: Option<&std::collections::HashMap<String, String>>,
 ) -> CommandResponse {
     let mut results = Vec::new();
 
-    // Filter to only allowed tokens
-    let (allowed, rejected) = tokens::filter_allowed(tokens);
-    for token in rejected {
-        results.push(PriceResult {
-            token,
-            price: None,
-            timestamp: None,
-            sources: None,
-            from_cache: None,
-            error: Some("Token not in allowed list".to_string()),
-        });
-    }
+    // Load exchange configs from public storage
+    let configs = match load_exchange_configs() {
+        Ok(c) => c,
+        Err(e) => {
+            return CommandResponse {
+                success: false,
+                prices: vec![],
+                error: Some(e),
+            };
+        }
+    };
 
     // Get universal API key from environment (used for CoinGecko, etc.)
     let api_key = env::var("API_KEY").ok();
 
-    for token in allowed {
-        match fetch_and_store_price(&token, api_key.as_deref(), aggregation_method, min_sources_num) {
+    for token in tokens {
+        let token = token.to_string();
+        let config = match configs.get(&token) {
+            Some(c) => c,
+            None => {
+                results.push(PriceResult {
+                    token,
+                    price: None,
+                    timestamp: None,
+                    sources: None,
+                    from_cache: None,
+                    error: Some("Token not in exchange config".to_string()),
+                });
+                continue;
+            }
+        };
+
+        match fetch_and_store_price(&token, config, api_key.as_deref(), aggregation_method, min_sources_num) {
             Ok(stored) => {
                 results.push(PriceResult {
                     token: token.clone(),
@@ -142,9 +225,125 @@ fn handle_update_prices(
         }
     }
 
-    // TODO: If update_contract is true, call report_prices on contract
+    // Alert if Chainlink was disabled during this run (all RPCs failed)
+    if oracle_ark_sources::CHAINLINK_DISABLED.load(std::sync::atomic::Ordering::Relaxed) {
+        telegram::send_alert(
+            "Chainlink Disabled",
+            "All Chainlink Ethereum RPCs failed. Chainlink source disabled for this run.\nPrices still available from other sources.",
+        );
+    }
+
+    // If update_contract is true, sign and send report_prices tx to the oracle contract
+    // Throttle: skip tokens reported to contract less than 20s ago
+    const MIN_CONTRACT_REPORT_INTERVAL: u64 = 20;
+
     if update_contract {
-        eprintln!("Contract update requested but not yet implemented");
+        if let Some(contract_id) = contract_id {
+            let now = current_timestamp();
+
+            // Build AssetPrice entries from successful results, skipping recently-reported ones
+            // Contract Price format: { multiplier: u128 as string, decimals: u8 }
+            // We use decimals=8, so multiplier = price * 10^8
+            let prices_for_contract: Vec<(String, serde_json::Value)> = results.iter()
+                .filter(|r| r.price.is_some() && r.error.is_none())
+                .filter(|r| {
+                    // Check last_contract_report from stored price
+                    let key = StoredPrice::storage_key(&r.token);
+                    match storage::get_worker(&key) {
+                        Ok(Some(data)) => {
+                            match serde_json::from_slice::<StoredPrice>(&data) {
+                                Ok(stored) => {
+                                    if let Some(last_report) = stored.last_contract_report {
+                                        if now.saturating_sub(last_report) < MIN_CONTRACT_REPORT_INTERVAL {
+                                            eprintln!("{}: skipping contract report ({}s since last)", r.token, now - last_report);
+                                            return false;
+                                        }
+                                    }
+                                    true
+                                }
+                                Err(_) => true,
+                            }
+                        }
+                        _ => true,
+                    }
+                })
+                .map(|r| {
+                    let price_f64 = r.price.unwrap();
+                    let multiplier = (price_f64 * 100_000_000.0).round() as u128;
+                    (r.token.clone(), serde_json::json!({
+                        "asset_id": r.token,
+                        "price": {
+                            "multiplier": multiplier.to_string(),
+                            "decimals": 8
+                        }
+                    }))
+                })
+                .collect();
+
+            if !prices_for_contract.is_empty() {
+                // Group prices by oracle key
+                let mut by_key: std::collections::HashMap<String, Vec<(String, serde_json::Value)>> =
+                    std::collections::HashMap::new();
+
+                if let Some(keys) = oracle_keys {
+                    // Only push assets that have explicit key assignments
+                    for (asset_id, price_json) in prices_for_contract {
+                        if let Some(key_name) = keys.get(&asset_id) {
+                            by_key.entry(key_name.clone()).or_default().push((asset_id, price_json));
+                        }
+                        // Assets without key mapping are warm-only (not pushed to contract)
+                    }
+                } else {
+                    // No oracle_keys provided — push all with default key
+                    let default_key = "PROTECTED_ORACLE_KEY".to_string();
+                    for entry in prices_for_contract {
+                        by_key.entry(default_key.clone()).or_default().push(entry);
+                    }
+                }
+
+                // Send one transaction per key
+                for (key_name, entries) in &by_key {
+                    let price_jsons: Vec<&serde_json::Value> = entries.iter().map(|(_, j)| j).collect();
+                    let args = serde_json::json!({ "prices": price_jsons });
+                    match report_prices_to_contract(contract_id, key_name, &args.to_string()) {
+                        Ok(hash) => {
+                            eprintln!("Contract updated via {}: {}", key_name, hash);
+                            // Mark reported tokens with last_contract_report timestamp
+                            for (asset_id, _) in entries {
+                                let key = StoredPrice::storage_key(asset_id);
+                                if let Ok(Some(data)) = storage::get_worker(&key) {
+                                    if let Ok(mut stored) = serde_json::from_slice::<StoredPrice>(&data) {
+                                        stored.last_contract_report = Some(now);
+                                        if let Ok(json) = serde_json::to_vec(&stored) {
+                                            let _ = storage::set_worker_with_options(&key, &json, Some(false));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            let signer_info = env::var(key_name)
+                                .ok()
+                                .and_then(|k| near_tx::derive_implicit_account(&k).ok())
+                                .map(|(id, _)| id)
+                                .unwrap_or_else(|| "unknown".to_string());
+                            eprintln!("Contract update failed ({}): {}", key_name, e);
+                            telegram::send_alert(
+                                "Contract Update Failed",
+                                &format!(
+                                    "Contract: {}\nKey: {}\nSigner: {}\nAssets: {:?}\nError: {}\n\nIf 'account not found': fund the implicit account with ≥0.01 NEAR",
+                                    contract_id, key_name, signer_info,
+                                    entries.iter().filter_map(|(_, p)| p["asset_id"].as_str()).collect::<Vec<_>>(),
+                                    e
+                                ),
+                            );
+                        }
+                    }
+                }
+            }
+        } else {
+            eprintln!("update_contract=true but no contract_id provided");
+        }
     }
 
     let success = results.iter().all(|r| r.error.is_none());
@@ -153,6 +352,31 @@ fn handle_update_prices(
         prices: results,
         error: None,
     }
+}
+
+/// Sign and send report_prices transaction to the oracle contract
+/// Uses a PROTECTED_ key (TEE-generated) and derives implicit account from it
+fn report_prices_to_contract(contract_id: &str, key_name: &str, args: &str) -> Result<String, String> {
+    let signer_key = env::var(key_name)
+        .map_err(|_| format!("{} not set", key_name))?;
+    let rpc_url = env::var("NEAR_RPC_URL")
+        .unwrap_or_else(|_| "https://rpc.mainnet.near.org".to_string());
+
+    // Derive implicit account ID from the protected key
+    let (signer_id, _) = near_tx::derive_implicit_account(&signer_key)
+        .map_err(|e| format!("Failed to derive implicit account from {}: {}", key_name, e))?;
+
+    near_tx::call(
+        &rpc_url,
+        &signer_id,
+        &signer_key,
+        contract_id,
+        "report_prices",
+        args,
+        100_000_000_000_000, // 100 TGas
+        0,                    // no deposit
+    )
+    .map_err(|e| e.to_string())
 }
 
 /// Handle get_prices command (blockchain requests)
@@ -166,23 +390,37 @@ fn handle_get_prices(
     let mut results = Vec::new();
     let now = current_timestamp();
 
-    // Filter to only allowed tokens
-    let (allowed, rejected) = tokens::filter_allowed(tokens);
-    for token in rejected {
-        results.push(PriceResult {
-            token,
-            price: None,
-            timestamp: None,
-            sources: None,
-            from_cache: None,
-            error: Some("Token not in allowed list".to_string()),
-        });
-    }
+    // Load exchange configs from public storage
+    let configs = match load_exchange_configs() {
+        Ok(c) => c,
+        Err(e) => {
+            return CommandResponse {
+                success: false,
+                prices: vec![],
+                error: Some(e),
+            };
+        }
+    };
 
     // Get universal API key for potential fresh fetches
     let api_key = env::var("API_KEY").ok();
 
-    for token in allowed {
+    for token_ref in tokens {
+        let token = token_ref.to_string();
+        let config = match configs.get(&token) {
+            Some(c) => c,
+            None => {
+                results.push(PriceResult {
+                    token,
+                    price: None,
+                    timestamp: None,
+                    sources: None,
+                    from_cache: None,
+                    error: Some("Token not in exchange config".to_string()),
+                });
+                continue;
+            }
+        };
         let key = StoredPrice::storage_key(&token);
 
         // Try to read from public storage
@@ -202,7 +440,7 @@ fn handle_get_prices(
                             });
                         } else {
                             // Cached price is stale, fetch fresh
-                            match fetch_and_store_price(&token, api_key.as_deref(), aggregation_method, min_sources_num) {
+                            match fetch_and_store_price(&token, config, api_key.as_deref(), aggregation_method, min_sources_num) {
                                 Ok(new_stored) => {
                                     results.push(PriceResult {
                                         token,
@@ -233,7 +471,7 @@ fn handle_get_prices(
                     }
                     Err(e) => {
                         // Corrupted cache, fetch fresh
-                        match fetch_and_store_price(&token, api_key.as_deref(), aggregation_method, min_sources_num) {
+                        match fetch_and_store_price(&token, config, api_key.as_deref(), aggregation_method, min_sources_num) {
                             Ok(new_stored) => {
                                 results.push(PriceResult {
                                     token,
@@ -265,7 +503,7 @@ fn handle_get_prices(
             }
             Ok(None) => {
                 // No cached price, fetch fresh
-                match fetch_and_store_price(&token, api_key.as_deref(), aggregation_method, min_sources_num) {
+                match fetch_and_store_price(&token, config, api_key.as_deref(), aggregation_method, min_sources_num) {
                     Ok(new_stored) => {
                         results.push(PriceResult {
                             token,
@@ -318,24 +556,39 @@ fn handle_force_update(
 ) -> CommandResponse {
     let mut results = Vec::new();
 
-    // Filter to only allowed tokens
-    let (allowed, rejected) = tokens::filter_allowed(tokens);
-    for token in rejected {
-        results.push(PriceResult {
-            token,
-            price: None,
-            timestamp: None,
-            sources: None,
-            from_cache: None,
-            error: Some("Token not in allowed list".to_string()),
-        });
-    }
+    // Load exchange configs from public storage
+    let configs = match load_exchange_configs() {
+        Ok(c) => c,
+        Err(e) => {
+            return CommandResponse {
+                success: false,
+                prices: vec![],
+                error: Some(e),
+            };
+        }
+    };
 
     // Get universal API key from environment
     let api_key = env::var("API_KEY").ok();
 
-    for token in allowed {
-        match fetch_and_store_price(&token, api_key.as_deref(), aggregation_method, min_sources_num) {
+    for token_ref in tokens {
+        let token = token_ref.to_string();
+        let config = match configs.get(&token) {
+            Some(c) => c,
+            None => {
+                results.push(PriceResult {
+                    token,
+                    price: None,
+                    timestamp: None,
+                    sources: None,
+                    from_cache: None,
+                    error: Some("Token not in exchange config".to_string()),
+                });
+                continue;
+            }
+        };
+
+        match fetch_and_store_price(&token, config, api_key.as_deref(), aggregation_method, min_sources_num) {
             Ok(stored) => {
                 results.push(PriceResult {
                     token,
@@ -431,12 +684,13 @@ fn handle_fetch_external(token_id: &str, source: &ExternalPriceSource) -> Extern
 /// Uses shared oracle-ark-sources crate for consistency with scheduler
 fn fetch_and_store_price(
     token: &str,
+    config: &ExchangeConfig,
     api_key: Option<&str>,
     aggregation_method: AggregationMethod,
     min_sources_num: u8,
 ) -> Result<StoredPrice, String> {
-    // Use shared crate's fetch_all_sources for consistency with scheduler
-    let source_prices = shared_sources::fetch_all_sources(token, api_key);
+    // Use shared crate's fetch_all_sources with exchange config
+    let source_prices = shared_sources::fetch_all_sources(config, api_key);
 
     if source_prices.is_empty() {
         // Alert: no sources returned price
@@ -584,6 +838,40 @@ struct TestTelegramResponse {
     message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
+}
+
+/// Handle get_public_key command - returns implicit account ID and public key for a PROTECTED_ key
+fn handle_get_public_key(key_name: &str) -> types::PublicKeyResponse {
+    if !key_name.starts_with("PROTECTED_") {
+        return types::PublicKeyResponse {
+            success: false,
+            implicit_account_id: None,
+            public_key: None,
+            error: Some("key_name must start with PROTECTED_".to_string()),
+        };
+    }
+    match env::var(key_name) {
+        Ok(private_key) => match near_tx::derive_implicit_account(&private_key) {
+            Ok((account_id, public_key)) => types::PublicKeyResponse {
+                success: true,
+                implicit_account_id: Some(account_id),
+                public_key: Some(public_key),
+                error: None,
+            },
+            Err(e) => types::PublicKeyResponse {
+                success: false,
+                implicit_account_id: None,
+                public_key: None,
+                error: Some(format!("Key derivation failed: {}", e)),
+            },
+        },
+        Err(_) => types::PublicKeyResponse {
+            success: false,
+            implicit_account_id: None,
+            public_key: None,
+            error: Some(format!("{} not found in environment", key_name)),
+        },
+    }
 }
 
 /// Handle test_telegram command - sends a test message to configured Telegram chat

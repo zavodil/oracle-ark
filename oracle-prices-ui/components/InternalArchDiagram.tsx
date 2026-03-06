@@ -15,7 +15,7 @@ export default function InternalArchDiagram() {
     // Set canvas size
     const dpr = window.devicePixelRatio || 1;
     const width = 700;
-    const height = 320;
+    const height = 400;
     canvas.width = width * dpr;
     canvas.height = height * dpr;
     canvas.style.width = `${width}px`;
@@ -32,6 +32,7 @@ export default function InternalArchDiagram() {
       secondary: '#10b981',
       accent: '#f59e0b',
       tee: '#8b5cf6',
+      push: '#ef4444',
       text: '#e5e7eb',
       muted: '#6b7280',
       border: '#374151',
@@ -119,6 +120,36 @@ export default function InternalArchDiagram() {
       }
     };
 
+    // Draw dashed arrow helper
+    const drawDashedArrow = (fromX: number, fromY: number, toX: number, toY: number, color: string) => {
+      ctx.setLineDash([5, 3]);
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(fromX, fromY);
+      ctx.lineTo(toX, toY);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      // Arrowhead
+      const angle = Math.atan2(toY - fromY, toX - fromX);
+      const headLen = 8;
+      ctx.fillStyle = color;
+      ctx.beginPath();
+      ctx.moveTo(toX, toY);
+      ctx.lineTo(
+        toX - headLen * Math.cos(angle - Math.PI / 6),
+        toY - headLen * Math.sin(angle - Math.PI / 6)
+      );
+      ctx.lineTo(
+        toX - headLen * Math.cos(angle + Math.PI / 6),
+        toY - headLen * Math.sin(angle + Math.PI / 6)
+      );
+      ctx.closePath();
+      ctx.fill();
+    };
+
+    // ===== Boxes =====
+
     // Scheduler
     drawBox(40, 40, 130, 60, colors.accent, 'Scheduler', '(external)');
 
@@ -140,19 +171,28 @@ export default function InternalArchDiagram() {
     ctx.font = '11px system-ui, sans-serif';
     ctx.textAlign = 'left';
     const steps = [
-      'Fetch 9+ sources',
+      'Fetch 10 sources',
       'Aggregate (median)',
-      'Store in TEE',
-      'Update contract',
+      'Store in TEE storage',
+      'report_prices',
     ];
     steps.forEach((step, i) => {
+      // Highlight step 4 in push color
+      if (i === 3) {
+        ctx.fillStyle = colors.push;
+      } else {
+        ctx.fillStyle = colors.muted;
+      }
       ctx.fillText(`${i + 1}. ${step}`, 515, 140 + i * 22);
     });
 
-    // Arrows
+    // price-oracle.near contract (NEW)
+    drawBox(490, 310, 190, 50, colors.push, 'price-oracle.near', 'NEAR contract');
+
+    // ===== Arrows =====
+
     // Scheduler monitors storage
     drawArrow(105, 100, 105, 180, colors.accent);
-    // Label on the right of the arrow
     ctx.fillStyle = colors.muted;
     ctx.font = '11px system-ui, sans-serif';
     ctx.textAlign = 'left';
@@ -170,59 +210,61 @@ export default function InternalArchDiagram() {
     drawArrow(405, 150, 495, 150, colors.primary, 'execute WASI');
 
     // On-chain requests -> TEE (from contracts, via OutLayer)
-    ctx.setLineDash([5, 3]);
-    ctx.strokeStyle = colors.text;
-    ctx.lineWidth = 2;
-    // Draw straight arrow
-    ctx.beginPath();
-    ctx.moveTo(480, 60);
-    ctx.lineTo(500, 80);
-    ctx.stroke();
-    ctx.setLineDash([]);
-    // Arrowhead
-    ctx.fillStyle = colors.text;
-    const angle = Math.atan2(80 - 60, 500 - 480);
-    ctx.beginPath();
-    ctx.moveTo(500, 80);
-    ctx.lineTo(500 - 8 * Math.cos(angle - Math.PI / 6), 80 - 8 * Math.sin(angle - Math.PI / 6));
-    ctx.lineTo(500 - 8 * Math.cos(angle + Math.PI / 6), 80 - 8 * Math.sin(angle + Math.PI / 6));
-    ctx.closePath();
-    ctx.fill();
-    // Label
+    drawDashedArrow(480, 60, 500, 80, colors.text);
     ctx.fillStyle = colors.text;
     ctx.font = '11px system-ui, sans-serif';
     ctx.textAlign = 'center';
-    ctx.fillText('on-chain requests', 490, 45);
+    ctx.fillText('on-chain requests', 440, 45);
     ctx.fillStyle = colors.muted;
     ctx.font = '10px system-ui, sans-serif';
-    ctx.fillText('(from contracts)', 490, 58);
+    ctx.fillText('(on-demand)', 440, 58);
 
-    // TEE -> Storage (dashed)
-    ctx.setLineDash([5, 3]);
-    ctx.strokeStyle = colors.tee;
-    ctx.beginPath();
-    ctx.moveTo(500, 220);
-    ctx.lineTo(220, 220);
-    ctx.stroke();
-    ctx.setLineDash([]);
-    // Arrowhead
-    ctx.fillStyle = colors.tee;
-    ctx.beginPath();
-    ctx.moveTo(220, 220);
-    ctx.lineTo(228, 215);
-    ctx.lineTo(228, 225);
-    ctx.closePath();
-    ctx.fill();
+    // TEE -> Storage (dashed purple)
+    drawDashedArrow(500, 220, 220, 220, colors.tee);
     ctx.fillStyle = colors.muted;
     ctx.font = '11px system-ui, sans-serif';
     ctx.textAlign = 'center';
-    ctx.fillText('update', 360, 210);
+    ctx.fillText('store prices', 360, 210);
 
-    // Note
+    // TEE -> Contract (dashed red — proactive push, NEW)
+    drawDashedArrow(585, 260, 585, 310, colors.push);
+    ctx.fillStyle = colors.push;
+    ctx.font = '11px system-ui, sans-serif';
+    ctx.textAlign = 'left';
+    ctx.fillText('report_prices', 595, 280);
+    ctx.font = '10px system-ui, sans-serif';
+    ctx.fillText('(TEE-signed key)', 595, 293);
+
+    // Legend
     ctx.fillStyle = colors.muted;
     ctx.font = '11px system-ui, sans-serif';
     ctx.textAlign = 'left';
-    ctx.fillText('Scheduler runs on mainnet only. Testnet: on-demand fetching.', 10, height - 15);
+    ctx.fillText('Proactive pushing: prices always fresh in contract (30-60s updates)', 10, height - 15);
+
+    // Legend color indicators
+    const legendY = height - 38;
+    // On-demand
+    ctx.setLineDash([5, 3]);
+    ctx.strokeStyle = colors.text;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(10, legendY);
+    ctx.lineTo(35, legendY);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = colors.muted;
+    ctx.font = '10px system-ui, sans-serif';
+    ctx.fillText('on-demand', 40, legendY + 3);
+    // Proactive push
+    ctx.setLineDash([5, 3]);
+    ctx.strokeStyle = colors.push;
+    ctx.beginPath();
+    ctx.moveTo(110, legendY);
+    ctx.lineTo(135, legendY);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = colors.push;
+    ctx.fillText('proactive push', 140, legendY + 3);
 
   }, []);
 

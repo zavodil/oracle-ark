@@ -873,6 +873,9 @@ async fn call_wasi_update(
     let mut body = serde_json::json!({
         "input": input,
         "async": false,  // Wait for result
+        "resource_limits": {
+            "max_execution_seconds": 180
+        }
     });
 
     // Include secrets only when actually updating contract

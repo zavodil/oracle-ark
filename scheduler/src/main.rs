@@ -197,7 +197,7 @@ async fn main() -> Result<()> {
 
     let config = Config::from_env()?;
     let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(120))
+        .timeout(Duration::from_secs(300)) // Must be > max_execution_seconds (180) + coordinator overhead
         .build()?;
 
     info!("Starting oracle scheduler");

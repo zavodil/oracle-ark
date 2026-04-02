@@ -16,7 +16,7 @@ COPY sources /sources
 COPY scheduler .
 
 # Build release binary
-RUN cargo build --release
+RUN cargo build --release --locked
 
 # Runtime stage
 FROM debian:bookworm-slim

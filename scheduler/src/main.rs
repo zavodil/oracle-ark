@@ -43,6 +43,9 @@ struct Config {
     /// Update interval for priority assets (NEAR, BTC, ETH) — default: same as update_interval
     update_interval_priority_secs: u64,
 
+    /// Poll interval in seconds when no update is needed (default: 5)
+    poll_interval_secs: u64,
+
     /// Priority asset IDs (updated more frequently)
     priority_assets: Vec<String>,
 
@@ -106,6 +109,10 @@ impl Config {
                         .and_then(|v| v.parse().ok())
                         .unwrap_or(60)
                 }),
+            poll_interval_secs: env::var("POLL_INTERVAL_SECS")
+                .unwrap_or_else(|_| "5".to_string())
+                .parse()
+                .unwrap_or(5),
             priority_assets: env::var("PRIORITY_ASSETS")
                 .unwrap_or_else(|_| "wrap.near,nbtc.bridge.near,aurora".to_string())
                 .split(',')
@@ -197,7 +204,7 @@ async fn main() -> Result<()> {
 
     let config = Config::from_env()?;
     let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(300)) // Must be > max_execution_seconds (180) + coordinator overhead
+        .timeout(Duration::from_secs(30)) // All requests are short (async submit + poll)
         .build()?;
 
     info!("Starting oracle scheduler");
@@ -205,9 +212,10 @@ async fn main() -> Result<()> {
     info!("Project: {}/{}", config.project_owner, config.project_name);
     info!("Exchange configs: loaded from public storage (config:assets)");
     info!(
-        "Update intervals: priority={}s, full={}s, threshold={}%",
+        "Update intervals: priority={}s, full={}s, poll={}s, threshold={}%",
         config.update_interval_priority_secs,
         config.update_interval_secs,
+        config.poll_interval_secs,
         config.price_diff_threshold_percent
     );
     info!("Priority assets: {:?}", config.priority_assets);
@@ -250,8 +258,8 @@ async fn main() -> Result<()> {
     // Throttle repeated telegram alerts (10 min cooldown)
     let mut alert_throttle = telegram::AlertThrottle::new();
 
-    // Main loop - poll every 10 seconds
-    let poll_interval = Duration::from_secs(10);
+    // Main loop - each iteration does one WASI call (if needed),
+    // then waits the full interval before the next check.
 
     loop {
         // Refresh exchange configs from public storage
@@ -283,7 +291,7 @@ async fn main() -> Result<()> {
                 Err(e) => {
                     if exchange_configs_cache.is_none() {
                         error!("Failed to load exchange configs and no cache available: {}", e);
-                        tokio::time::sleep(poll_interval).await;
+                        tokio::time::sleep(Duration::from_secs(config.poll_interval_secs)).await;
                         continue;
                     }
                     warn!("Failed to refresh exchange configs: {}. Using cached.", e);
@@ -389,9 +397,10 @@ async fn main() -> Result<()> {
             }
         }
 
-        match poll_and_update(&client, &config, &mut last_priority_update, &mut last_full_update, oracle_keys_cache.as_ref(), contract_update_paused, exchange_configs, &mut alert_throttle).await {
-            Ok(_) => {
+        let wasi_was_called = match poll_and_update(&client, &config, &mut last_priority_update, &mut last_full_update, oracle_keys_cache.as_ref(), contract_update_paused, exchange_configs, &mut alert_throttle).await {
+            Ok(called) => {
                 consecutive_failures = 0;
+                called
             }
             Err(e) => {
                 error!("Poll cycle failed: {}", e);
@@ -411,10 +420,15 @@ async fn main() -> Result<()> {
                     )
                     .await;
                 }
+                false
             }
-        }
+        };
 
-        tokio::time::sleep(poll_interval).await;
+        if !wasi_was_called || consecutive_failures > 0 {
+            // No update needed or error — wait before next check
+            tokio::time::sleep(Duration::from_secs(config.poll_interval_secs)).await;
+        }
+        // If WASI was called successfully — immediately start next check cycle
     }
 }
 
@@ -641,7 +655,7 @@ async fn poll_and_update(
     contract_update_paused: bool,
     exchange_configs: &HashMap<String, ExchangeConfig>,
     alert_throttle: &mut telegram::AlertThrottle,
-) -> Result<()> {
+) -> Result<bool> {
     // Reset Chainlink disabled state each cycle (scheduler is long-lived)
     oracle_ark_sources::CHAINLINK_DISABLED.store(false, std::sync::atomic::Ordering::Relaxed);
 
@@ -694,7 +708,7 @@ async fn poll_and_update(
         )
         .await;
 
-        return Ok(());
+        return Ok(false);
     }
 
     // 2. Determine scheduled batch: full update or priority-only
@@ -756,10 +770,9 @@ async fn poll_and_update(
                 } else if priority_due {
                     *last_priority_update = Some(now);
                 }
+                return Ok(true);
             }
             Err(e) => {
-                error!("WASI update failed: {}", e);
-
                 // Send Telegram alert for WASI failures (throttled)
                 alert_throttle.send(
                     client,
@@ -772,11 +785,12 @@ async fn poll_and_update(
                     ),
                 )
                 .await;
+                anyhow::bail!("WASI update failed: {}", e);
             }
         }
     }
 
-    Ok(())
+    Ok(false) // nothing to update
 }
 
 async fn read_public_storage_batch(
@@ -870,11 +884,13 @@ async fn call_wasi_update(
         }
     }
 
+    let max_execution_secs: u64 = 180;
+
     let mut body = serde_json::json!({
         "input": input,
-        "async": false,  // Wait for result
+        "async": true,
         "resource_limits": {
-            "max_execution_seconds": 180
+            "max_execution_seconds": max_execution_secs
         }
     });
 
@@ -890,8 +906,9 @@ async fn call_wasi_update(
         }
     }
 
-    debug!("Calling WASI: {}", serde_json::to_string_pretty(&body)?);
+    info!("Calling WASI (async): {} tokens", tokens.len());
 
+    // 1. Submit async call — coordinator returns immediately with call_id
     let resp = client
         .post(&url)
         .header("X-Payment-Key", &config.payment_key)
@@ -906,18 +923,71 @@ async fn call_wasi_update(
         anyhow::bail!("HTTP {}: {}", status, text);
     }
 
-    let wasi_resp: WasiCallResponse = resp.json().await?;
+    let submit_resp: WasiCallResponse = resp.json().await?;
+    let call_id = submit_resp.call_id
+        .context("No call_id in async response")?;
 
-    if let Some(error) = wasi_resp.error {
-        anyhow::bail!("WASI error: {}", error);
-    }
+    info!("WASI call submitted: call_id={}", call_id);
 
-    if let Some(status) = &wasi_resp.status {
-        if status == "failed" {
-            anyhow::bail!("WASI execution failed");
+    // 2. Poll for result until completed/failed
+    let poll_url = format!("{}/calls/{}", config.coordinator_url, call_id);
+    let status_poll_interval = Duration::from_secs(3);
+    // Allow 2x max_execution for compilation + overhead
+    let deadline = Instant::now() + Duration::from_secs(max_execution_secs * 2);
+    let mut last_status = String::new();
+
+    loop {
+        tokio::time::sleep(status_poll_interval).await;
+
+        if Instant::now() > deadline {
+            anyhow::bail!("WASI call {} timed out after {}s", call_id, max_execution_secs * 2);
+        }
+
+        let resp = match client
+            .get(&poll_url)
+            .header("X-Payment-Key", &config.payment_key)
+            .send()
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                warn!("Poll {} request failed: {}", call_id, e);
+                continue;
+            }
+        };
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            warn!("Poll {} returned HTTP {}: {}", call_id, status, text);
+            continue;
+        }
+
+        let poll_resp: WasiCallResponse = match resp.json().await {
+            Ok(r) => r,
+            Err(e) => {
+                warn!("Poll {} parse error: {}", call_id, e);
+                continue;
+            }
+        };
+        let status = poll_resp.status.as_deref().unwrap_or("unknown");
+
+        match status {
+            "completed" => {
+                info!("WASI call {} completed", call_id);
+                return Ok(());
+            }
+            "failed" => {
+                let error = poll_resp.error.unwrap_or_else(|| "unknown error".to_string());
+                anyhow::bail!("WASI call {} failed: {}", call_id, error);
+            }
+            _ => {
+                // Log only on status change to avoid spam
+                if status != last_status {
+                    info!("WASI call {} status: {}", call_id, status);
+                    last_status = status.to_string();
+                }
+            }
         }
     }
-
-    debug!("WASI response: {:?}", wasi_resp);
-    Ok(())
 }

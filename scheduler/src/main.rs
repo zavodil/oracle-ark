@@ -131,7 +131,7 @@ impl Config {
             secrets_profile: env::var("SECRETS_PROFILE").ok(),
             secrets_account_id: env::var("SECRETS_ACCOUNT_ID").ok(),
             near_rpc_url: env::var("NEAR_RPC_URL")
-                .unwrap_or_else(|_| "https://rpc.mainnet.near.org".to_string()),
+                .unwrap_or_else(|_| "https://rpc.mainnet.fastnear.com".to_string()),
             aggregation_method: env::var("AGGREGATION_METHOD")
                 .unwrap_or_else(|_| "median".to_string()),
             min_sources_num: env::var("MIN_SOURCES_NUM")
@@ -356,7 +356,8 @@ async fn main() -> Result<()> {
                     .map(|t| t.elapsed() >= BALANCE_CHECK_INTERVAL)
                     .unwrap_or(true);
                 if should_check {
-                    let mut any_low = false;
+                    let mut any_low = false;      // at least one signer confirmed below min
+                    let mut check_failed = false; // at least one balance could not be confirmed
                     for signer_account in &accounts_to_check {
                         match check_near_balance(&client, &config.near_rpc_url, signer_account).await {
                             Ok(balance) => {
@@ -382,14 +383,19 @@ async fn main() -> Result<()> {
                                 }
                             }
                             Err(e) => {
+                                check_failed = true;
                                 warn!("Failed to check oracle signer balance for {}: {}", signer_account, e);
                             }
                         }
                     }
+                    // Fail-safe: push ONLY when every signer balance is confirmed >= min.
+                    // A balance we couldn't read (RPC error) is NOT a green light — we keep
+                    // updates paused and never resume on a guess. Resuming requires a positive
+                    // confirmation, which is exactly the "fund the account to resume" flow.
                     let was_paused = contract_update_paused;
-                    contract_update_paused = any_low;
+                    contract_update_paused = any_low || check_failed;
                     if !contract_update_paused && was_paused {
-                        info!("Oracle signer balances restored, resuming contract updates");
+                        info!("Oracle signer balances confirmed >= min, resuming contract updates");
                         balance_alert_sent = false;
                     }
                     balance_check_at = Some(Instant::now());

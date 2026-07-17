@@ -70,17 +70,20 @@ near call price-oracle.near new '{
 
 ### Upgrade existing deployment
 
-This is the **last time** the owner-only `upgrade` method is used.
-After this deploy, `upgrade` is removed — all future upgrades go through DAO.
+This is the **last time** the owner redeploys the contract directly, using the
+`price-oracle.near` account's own full-access key. There is no `upgrade` method —
+after the council is bootstrapped (Step 3), all future upgrades go through DAO
+(`upload_upgrade_code` + `upgrade_contract` proposal, see "Future Upgrades" below).
 
 ```bash
-near call price-oracle.near upgrade \
-  --base64File target/near/price_oracle.wasm \
-  --accountId owner.near --deposit 0.000000000000000000000001 \
-  --gas 300000000000000
+near contract deploy price-oracle.near \
+  use-file target/near/price_oracle.wasm \
+  with-init-call migrate_state2 json-args '{}' \
+  prepaid-gas '300.0 Tgas' attached-deposit '0 NEAR' \
+  network-config mainnet sign-with-keychain send
 ```
 
-The upgrade calls `migrate_state2` automatically, which adds:
+The `migrate_state2` migration adds:
 - `asset_oracle_keys` — per-asset TEE key mapping
 - `pending_upgrade_codes` — DAO upgrade code storage
 
@@ -122,7 +125,7 @@ near call price-oracle.near create_proposal '{"action": {
   "code_source": "{\"Project\":{\"project_id\":\"owner.near/oracle-ark\"}}",
   "secrets_profile": "default",
   "secrets_account_id": "owner.near"
-}}' --accountId member1.near --deposit 0.000000000000000000000001
+}}' --accountId member1.near --deposit 0.1
 ```
 
 If council has 2+ members:
@@ -140,7 +143,7 @@ near call price-oracle.near create_proposals '{"actions": [
   {"action": "add_asset", "asset_id": "wrap.near", "push_signer_key": null},
   {"action": "add_asset", "asset_id": "usdt.tether-token.near", "push_signer_key": null},
   {"action": "add_asset", "asset_id": "17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1", "push_signer_key": null}
-]}' --accountId member1.near --deposit 0.000000000000000000000001
+]}' --accountId member1.near --deposit 0.1
 ```
 
 > `push_signer_key: null` — the key will be set by `RegisterPushSigner` in step 6.
@@ -150,7 +153,7 @@ Add EMAs if needed:
 near call price-oracle.near create_proposals '{"actions": [
   {"action": "add_asset_ema", "asset_id": "wrap.near", "period_sec": 3600},
   {"action": "add_asset_ema", "asset_id": "wrap.near", "period_sec": 86400}
-]}' --accountId member1.near --deposit 0.000000000000000000000001
+]}' --accountId member1.near --deposit 0.1
 ```
 
 ## Step 6: Register TEE Push Signer
@@ -219,7 +222,7 @@ so users can call `oracle_call` without attaching NEAR.
 near call price-oracle.near create_proposal '{"action": {
   "action": "set_subsidize_outlayer_calls",
   "enabled": true
-}}' --accountId member1.near --deposit 0.000000000000000000000001
+}}' --accountId member1.near --deposit 0.1
 ```
 
 Check status:
@@ -293,7 +296,7 @@ near call price-oracle.near create_proposal '{"action": {
   "action": "upgrade_contract",
   "code_hash": "<hash from step 1>",
   "migrate_method": null
-}}' --accountId member1.near --deposit 0.000000000000000000000001
+}}' --accountId member1.near --deposit 0.1
 
 # 3. Approve (deploys code + refunds storage deposit to uploader)
 near call price-oracle.near approve_proposal '{"id": <id>}' \

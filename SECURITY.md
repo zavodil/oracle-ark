@@ -38,21 +38,29 @@ Multiple layers of price validation:
 
 ## Key Management
 
-### Contract Owner Key
+### Governance: Council (DAO) + Owner
 
-The owner key controls:
+The contract is governed by a built-in **council (DAO)**. All state changes go through
+`create_proposal` and execute only after the approval threshold (>50% of members) is met:
 - Adding/removing oracles and assets
 - Configuring OutLayer integration
 - Enabling/disabling subsidized calls
+- Registering push signers
 - Contract upgrades
 
+The **owner** role is now bootstrap-only and cannot directly mutate oracle/asset/config
+state. It can call `set_council` (set the members) and `upload_upgrade_code` (stage
+upgrade bytes for an `UpgradeContract` proposal), plus read-only getters.
+
 **Best practices:**
-- Use a multisig account (e.g., Sputnik DAO) for production
-- Never store the owner key on servers running the scheduler
-- Transfer ownership to a DAO before going to mainnet production:
+- Set the owner to a multisig account (e.g., Sputnik DAO), and populate the council with
+  independent members.
+- Never store the owner or a council-member key on servers running the scheduler.
+- Ownership itself is transferred through a council proposal:
   ```bash
-  near call price-oracle.near update_owner_id '{"owner_id": "oracle-dao.sputnik-dao.near"}' \
-    --accountId current-owner.near --depositYocto 1
+  near call price-oracle.near create_proposal \
+    '{"action": {"action": "update_owner", "owner_id": "oracle-dao.sputnik-dao.near"}}' \
+    --accountId council-member.near --deposit 0.1
   ```
 
 ### Payment Key

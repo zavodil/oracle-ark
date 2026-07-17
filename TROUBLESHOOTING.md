@@ -122,7 +122,7 @@ near view price-oracle.testnet get_price_data '{"asset_ids": ["wrap.near"]}' --n
      ```bash
      near call price-oracle.testnet create_proposal '{
        "action": {"action": "set_recency_duration_sec", "recency_duration_sec": 300}
-     }' --accountId COUNCIL_MEMBER --depositYocto 1 --networkId testnet
+     }' --accountId COUNCIL_MEMBER --deposit 0.1 --networkId testnet
      ```
 
 3. **Asset not registered** — Asset ID not added to contract.
@@ -130,7 +130,7 @@ near view price-oracle.testnet get_price_data '{"asset_ids": ["wrap.near"]}' --n
      ```bash
      near call price-oracle.testnet create_proposal '{
        "action": {"action": "add_asset", "asset_id": "wrap.near", "push_signer_key": null}
-     }' --accountId COUNCIL_MEMBER --depositYocto 1 --networkId testnet
+     }' --accountId COUNCIL_MEMBER --deposit 0.1 --networkId testnet
      ```
 
 4. **Oracle not registered** — Contract's own account not registered as oracle.
@@ -138,7 +138,7 @@ near view price-oracle.testnet get_price_data '{"asset_ids": ["wrap.near"]}' --n
      ```bash
      near call price-oracle.testnet create_proposal '{
        "action": {"action": "add_oracle", "account_id": "price-oracle.testnet"}
-     }' --accountId COUNCIL_MEMBER --depositYocto 1 --networkId testnet
+     }' --accountId COUNCIL_MEMBER --deposit 0.1 --networkId testnet
      ```
 
 ### `oracle_call` panics with "OutLayer not configured"
@@ -153,7 +153,7 @@ near call price-oracle.testnet create_proposal '{
     "secrets_profile": "default",
     "secrets_account_id": "OWNER"
   }
-}' --accountId COUNCIL_MEMBER --depositYocto 1 --networkId testnet
+}' --accountId COUNCIL_MEMBER --deposit 0.1 --networkId testnet
 ```
 
 ### `oracle_call` panics with "Requires at least 0.01 NEAR"
@@ -170,7 +170,7 @@ near call price-oracle.testnet oracle_call '{...}' --deposit 0.02
 # Enable subsidy via a council proposal
 near call price-oracle.testnet create_proposal '{
   "action": {"action": "set_subsidize_outlayer_calls", "enabled": true}
-}' --accountId COUNCIL_MEMBER --depositYocto 1 --networkId testnet
+}' --accountId COUNCIL_MEMBER --deposit 0.1 --networkId testnet
 
 # Fund contract (needs > 20 NEAR for subsidy to activate)
 near send OWNER price-oracle.testnet 25
@@ -199,7 +199,7 @@ near call price-oracle.testnet create_proposal '{
     "code_hash": "CODE_HASH_FROM_STEP_1",
     "migrate_method": "migrate_state3"
   }
-}' --accountId COUNCIL_MEMBER --depositYocto 1 --gas 300000000000000 --networkId testnet
+}' --accountId COUNCIL_MEMBER --deposit 0.1 --gas 300000000000000 --networkId testnet
 ```
 
 The proposal auto-executes once the approval threshold is met (self-executes if threshold == 1).
@@ -219,7 +219,7 @@ near call price-oracle.testnet upload_upgrade_code \
 
 near call price-oracle.testnet create_proposal '{
   "action": {"action": "upgrade_contract", "code_hash": "CODE_HASH_FROM_UPLOAD", "migrate_method": null}
-}' --accountId COUNCIL_MEMBER --depositYocto 1 --gas 300000000000000 --networkId testnet
+}' --accountId COUNCIL_MEMBER --deposit 0.1 --gas 300000000000000 --networkId testnet
 ```
 
 To discard an uploaded blob without deploying, call `remove_pending_upgrade_code '{"code_hash": "..."}'` (refunds the storage deposit to the uploader).
@@ -242,7 +242,7 @@ near call price-oracle.testnet create_proposal '{
     "secrets_profile": null,
     "secrets_account_id": null
   }
-}' --accountId COUNCIL_MEMBER --depositYocto 1 --networkId testnet
+}' --accountId COUNCIL_MEMBER --deposit 0.1 --networkId testnet
 ```
 
 Or upload WASM to FastFS/IPFS and use `WasmUrl`:

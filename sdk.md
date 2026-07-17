@@ -493,7 +493,7 @@ EMA must be configured via a council/DAO proposal first — there is no direct o
 ```bash
 # A council member proposes AddAssetEma; it executes once the vote threshold is met
 near call price-oracle.near create_proposal '{"action": {"action": "add_asset_ema", "asset_id": "wrap.near", "period_sec": 3600}}' \
-  --accountId council-member.near --depositYocto 1
+  --accountId council-member.near --deposit 0.1
 ```
 
 > **Compatibility:** EMA feature from NEAR Native Price Oracle.

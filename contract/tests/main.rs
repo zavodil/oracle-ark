@@ -1,3 +1,17 @@
+//! Integration tests — legacy `near_sdk_sim` harness.
+//!
+//! REQUIRES SETUP: this suite targets the old `near_sdk_sim` framework and near-sdk
+//! 4.x APIs (`Gas(...)`, `Gas::ONE_TERA`, `AccountId::new_unchecked`,
+//! `lazy_static_include`). The contract now builds on near-sdk 5.x and
+//! `near-sdk-sim` is not a dependency, so this file does NOT compile as-is and is not
+//! run in CI. It likely has not compiled since the near-sdk 5.x upgrade.
+//!
+//! Kept for reference — the helpers were updated to the current council/DAO flow
+//! (`set_council` + `create_proposal`), and `test_update` keeps legacy owner calls
+//! since it deploys the pre-council 0.5.0 binary. To run these tests again, set up
+//! `near-sdk-sim` (or port to `near-workspaces`) and rebuild `res/price_oracle.wasm`
+//! from the current source.
+
 use near_sdk::json_types::U128;
 use near_sdk::serde_json::json;
 use near_sdk::{AccountId, Gas, Timestamp};
@@ -83,49 +97,73 @@ impl Env {
         self.near.borrow_runtime_mut().cur_block.block_timestamp += to_nano(seconds);
     }
 
+    /// Bootstrap a single-member council (the owner). With one member the vote
+    /// threshold is 1, so every `create_proposal` auto-executes immediately.
+    /// Must be called once (by the current-version contract) before the council
+    /// helpers below. The legacy 0.5.0 contract used in `test_update` has no
+    /// council and uses the `*_legacy` owner helpers instead.
+    pub fn bootstrap_council(&self) {
+        self.owner
+            .call(
+                self.contract.account_id(),
+                "set_council",
+                &json!({ "members": [self.owner.account_id()] })
+                    .to_string()
+                    .into_bytes(),
+                DEFAULT_GAS.0,
+                1,
+            )
+            .assert_success();
+    }
+
+    /// Submit a council proposal as the owner (sole council member) — auto-executes.
+    /// Extra deposit covers proposal storage; the excess is refunded.
+    fn propose(&self, action: near_sdk::serde_json::Value) {
+        self.owner
+            .call(
+                self.contract.account_id(),
+                "create_proposal",
+                &json!({ "action": action }).to_string().into_bytes(),
+                MAX_GAS.0,
+                to_yocto("0.1"),
+            )
+            .assert_success();
+    }
+
     pub fn add_oracle(&self, user: &UserAccount) {
+        self.propose(json!({ "action": "add_oracle", "account_id": user.account_id() }));
+    }
+
+    pub fn add_asset(&self, asset_id: &str) {
+        // push_signer_key = null → warm-only asset with no push-signer allowlist,
+        // so any registered oracle may report_prices for it.
+        self.propose(json!({ "action": "add_asset", "asset_id": asset_id, "push_signer_key": null }));
+    }
+
+    pub fn add_asset_ema(&self, asset_id: &str, period_sec: DurationSec) {
+        self.propose(json!({ "action": "add_asset_ema", "asset_id": asset_id, "period_sec": period_sec }));
+    }
+
+    /// Legacy owner-only helpers — only for the 0.5.0 contract in `test_update`,
+    /// which predates the council and still exposes direct owner methods.
+    pub fn add_oracle_legacy(&self, user: &UserAccount) {
         self.owner
             .call(
                 self.contract.account_id(),
                 "add_oracle",
-                &json!({
-                    "account_id": user.account_id(),
-                })
-                .to_string()
-                .into_bytes(),
+                &json!({ "account_id": user.account_id() }).to_string().into_bytes(),
                 DEFAULT_GAS.0,
                 1,
             )
             .assert_success();
     }
 
-    pub fn add_asset(&self, asset_id: &str) {
+    pub fn add_asset_legacy(&self, asset_id: &str) {
         self.owner
             .call(
                 self.contract.account_id(),
                 "add_asset",
-                &json!({
-                    "asset_id": asset_id,
-                })
-                .to_string()
-                .into_bytes(),
-                DEFAULT_GAS.0,
-                1,
-            )
-            .assert_success();
-    }
-
-    pub fn add_asset_ema(&self, asset_id: &str, period_sec: DurationSec) {
-        self.owner
-            .call(
-                self.contract.account_id(),
-                "add_asset_ema",
-                &json!({
-                    "asset_id": asset_id,
-                    "period_sec": period_sec,
-                })
-                .to_string()
-                .into_bytes(),
+                &json!({ "asset_id": asset_id }).to_string().into_bytes(),
                 DEFAULT_GAS.0,
                 1,
             )
@@ -187,6 +225,7 @@ pub fn test_init() {
 #[test]
 pub fn test_basic() {
     let e = Env::setup(&CONTARCT_WASM_BYTES);
+    e.bootstrap_council();
 
     e.add_oracle(&e.users[0]);
     e.add_oracle(&e.users[1]);
@@ -213,6 +252,7 @@ pub fn test_basic() {
 #[test]
 pub fn test_claim_near() {
     let e = Env::setup(&CONTARCT_WASM_BYTES);
+    e.bootstrap_council();
 
     e.add_oracle(&e.users[0]);
     e.add_oracle(&e.users[1]);
@@ -279,6 +319,7 @@ pub fn test_claim_near() {
 #[test]
 pub fn test_claim_near_no_oracle_balance() {
     let e = Env::setup(&CONTARCT_WASM_BYTES);
+    e.bootstrap_council();
 
     e.add_oracle(&e.users[0]);
     e.add_oracle(&e.users[1]);
@@ -352,6 +393,7 @@ pub fn test_claim_near_no_oracle_balance() {
 #[test]
 pub fn test_ema() {
     let e = Env::setup(&CONTARCT_WASM_BYTES);
+    e.bootstrap_council();
 
     e.add_oracle(&e.users[0]);
     e.add_oracle(&e.users[1]);
@@ -492,11 +534,12 @@ pub fn test_ema() {
 pub fn test_update() {
     let e = Env::setup(&CONTRACT_0_5_0_WASM_BYTES);
 
-    e.add_oracle(&e.users[0]);
-    e.add_oracle(&e.users[1]);
-    e.add_oracle(&e.users[2]);
+    // 0.5.0 predates the council — use the legacy owner methods it still exposes.
+    e.add_oracle_legacy(&e.users[0]);
+    e.add_oracle_legacy(&e.users[1]);
+    e.add_oracle_legacy(&e.users[2]);
 
-    e.add_asset(WRAP_NEAR);
+    e.add_asset_legacy(WRAP_NEAR);
 
     e.make_reports(&[100000, 110000, 106000]);
 

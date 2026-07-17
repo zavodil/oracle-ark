@@ -7,6 +7,12 @@
   --foreground: #f8fafc;
 }
 
+/* Offset in-page anchor scrolling (scrollIntoView / #hash) so headings land
+   below the fixed 64px header (h-16) instead of hidden underneath it. */
+html {
+  scroll-padding-top: 5rem;
+}
+
 body {
   color: var(--foreground);
   background: var(--background);

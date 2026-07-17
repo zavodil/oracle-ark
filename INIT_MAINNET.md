@@ -12,15 +12,20 @@ cd wasi-examples/oracle-ark/contract
 cargo near build
 ```
 
-## 2. Upgrade + migrate (last owner upgrade)
+## 2. Upgrade + migrate (last owner redeploy)
+
+There is no `upgrade` method. Redeploy directly with the `price-oracle.near`
+account's own full-access key, running the migration that matches the currently
+deployed state (`migrate_state` → pre-Pyth/Council, `migrate_state2` →
+pre-oracle-keys, `migrate_state3` → pre-exchange-configs). After this, the
+council owns all future upgrades.
 
 ```bash
-WASM_BASE64=$(base64 -i target/near/price_oracle.wasm)
-near call price-oracle.near upgrade \
-  --base64 "$WASM_BASE64" \
-  --accountId owner.price-oracle.near \
-  --gas 300000000000000 \
-  --networkId mainnet
+near contract deploy price-oracle.near \
+  use-file target/near/price_oracle.wasm \
+  with-init-call migrate_state2 json-args '{}' \
+  prepaid-gas '300.0 Tgas' attached-deposit '0 NEAR' \
+  network-config mainnet sign-with-keychain send
 ```
 
 ## 3. Verify
@@ -46,7 +51,7 @@ near call price-oracle.near create_proposal '{"action": {
   "code_source": "{\"Project\":{\"project_id\":\"price-oracle.near/price-oracle\"}}",
   "secrets_profile": "default",
   "secrets_account_id": "price-oracle.near"
-}}' --accountId owner.price-oracle.near --depositYocto 1 --networkId mainnet
+}}' --accountId owner.price-oracle.near --deposit 0.1 --networkId mainnet
 ```
 
 ## 6. Add all assets
@@ -58,7 +63,7 @@ near call price-oracle.near create_proposals '{"actions": [
   {"action": "add_asset", "asset_id": "cardano.omft.near", "push_signer_key": null},
   {"action": "add_asset", "asset_id": "xlm", "push_signer_key": null},
   {"action": "add_asset", "asset_id": "ltc.omft.near", "push_signer_key": null}
-]}' --accountId owner.price-oracle.near --depositYocto 1 --networkId mainnet
+]}' --accountId owner.price-oracle.near --deposit 0.1 --networkId mainnet
 ```
 
 ## 7. Add EMAs (wrap.near)
@@ -67,7 +72,7 @@ near call price-oracle.near create_proposals '{"actions": [
 near call price-oracle.near create_proposals '{"actions": [
   {"action": "add_asset_ema", "asset_id": "wrap.near", "period_sec": 3600},
   {"action": "add_asset_ema", "asset_id": "wrap.near", "period_sec": 86400}
-]}' --accountId owner.price-oracle.near --depositYocto 1 --networkId mainnet
+]}' --accountId owner.price-oracle.near --deposit 0.1 --networkId mainnet
 ```
 
 # UPLOAD WASM TO FASTFS
@@ -125,7 +130,7 @@ near send owner.price-oracle.near <implicit_account_id> 0.1 --networkId mainnet
 near call price-oracle.near create_proposal '{"action": {
   "action": "set_subsidize_outlayer_calls",
   "enabled": true
-}}' --accountId owner.price-oracle.near --depositYocto 1 --networkId mainnet
+}}' --accountId owner.price-oracle.near --deposit 0.1 --networkId mainnet
 ```
 
 ## 12. Verify everything
@@ -169,7 +174,7 @@ near call price-oracle.near create_proposal '{"action": {
   "action": "upgrade_contract",
   "code_hash": "<CODE_HASH_FROM_UPLOAD>",
   "migrate_method": "migrate_state3"
-}}' --accountId owner.price-oracle.near --depositYocto 1 --networkId mainnet
+}}' --accountId owner.price-oracle.near --deposit 0.1 --networkId mainnet
 ```
 
 ## 2. Set exchange configs (batch proposal)
@@ -245,7 +250,7 @@ near call price-oracle.near create_proposal '{"action": {
   "action": "add_asset",
   "asset_id": "new-token.near",
   "push_signer_key": "PROTECTED_KEY_RHEA"
-}}' --accountId owner.price-oracle.near --depositYocto 1 --networkId mainnet
+}}' --accountId owner.price-oracle.near --deposit 0.1 --networkId mainnet
 
 # 2. Set exchange config
 near call price-oracle.near create_proposal '{"action": {

@@ -98,7 +98,7 @@ near call price-oracle.testnet oracle_call '{
 - `resource_limits` (optional): Override OutLayer execution limits
 
 **Deposit:**
-- If prices are fresh: 1 yoctoNEAR
+- If prices are fresh: no deposit required (any attached deposit is refunded)
 - If prices are stale: 0.01+ NEAR
 - If subsidized: free
 
@@ -308,6 +308,6 @@ const customData = await oracle.request_custom_data(
 |--------|-------------|----------------|------------|
 | `get_price_data` (view) | Free | N/A | N/A |
 | `request_price_data` | Free | 0.01+ NEAR | Free |
-| `oracle_call` | 1 yoctoNEAR | 0.01+ NEAR | Free |
+| `oracle_call` | None (refunded) | 0.01+ NEAR | Free |
 | `request_custom_data` | N/A | 0.01+ NEAR | Free |
 | `custom_call` | N/A | 0.01+ NEAR | Free |

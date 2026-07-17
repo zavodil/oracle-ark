@@ -1,5 +1,9 @@
 # Pyth-Compatible Wrapper Contract — Technical Specification
 
+> **Legacy / optional.** This standalone wrapper contract is now legacy. The main Oracle-Ark contract `price-oracle.near` implements the Pyth receiver API **natively** (see `../contract/src/pyth.rs`). **Use the native Pyth methods on `price-oracle.near` unless you specifically need a separate contract address.**
+>
+> One behavioral difference: the native contract's `get_ema_price` returns a real EMA, whereas **this** wrapper's `get_ema_price` just returns the spot price (see this crate's `src/lib.rs`). Native Pyth price-feed mappings are managed via council actions `AddPriceMapping` / `RemovePriceMapping` / `SetPythStaleThreshold`.
+
 NEAR smart contract that implements the same public API as the Pyth receiver contract (`pyth-oracle.near`), but internally uses Oracle-Ark (`price-oracle.near`) for price data.
 
 This enables existing DeFi protocols using Pyth to switch to Oracle-Ark with **minimal code changes** — update the contract address and adjust the deposit model (see [Migration Guide](#migration-guide-for-defi-protocols)).
@@ -73,7 +77,7 @@ fn list_prices_no_older_than(&self, price_ids: Vec<PriceIdentifier>) -> HashMap<
 ```rust
 /// Update price feeds. In Pyth this accepts Wormhole VAA data.
 /// In our wrapper, this is a NO-OP or triggers an oracle-ark update.
-fn update_price_feeds(&mut self, data: String) -> Result<(), Error>;
+pub fn update_price_feeds(&mut self, _data: String);
 
 /// Estimate fee for update. In Pyth this returns deposit needed for update_price_feeds.
 fn get_update_fee_estimate(&self, data: String) -> U128;
@@ -146,7 +150,7 @@ fn oracle_ark_to_pyth(multiplier: u128, decimals: u8, timestamp: u64) -> pyth::P
 ```
 Oracle-Ark contract (price-oracle.near)
     │
-    │  oracle_call(receiver_id=pyth-wrapper.near, asset_ids=["wrap.near", ...])
+    │  oracle_call(receiver_id=price-oracle-pyth.near, asset_ids=["wrap.near", ...])
     │
     ▼
 PythWrapper.oracle_on_call(data: PriceData)
@@ -155,7 +159,7 @@ PythWrapper.oracle_on_call(data: PriceData)
     │  Store in local UnorderedMap<PriceIdentifier, PythPrice>
     │
     ▼
-DeFi protocol calls pyth-wrapper.near
+DeFi protocol calls price-oracle-pyth.near
     │
     │  get_price(price_identifier) → reads from local cache → returns Pyth Price
     │
@@ -220,7 +224,7 @@ Full list: https://www.pyth.network/developers/price-feed-ids
 ## File Structure
 
 ```
-wasi-examples/oracle-ark/pyth-wrapper/
+wasi-examples/oracle-ark/pyth-compatible-wrapper/
 ├── SPEC.md              (this file)
 ├── Cargo.toml
 ├── rust-toolchain.toml  (channel = "1.85.0")
@@ -244,30 +248,30 @@ serde_json = "1"
 
 ```bash
 # Build
-cd pyth-wrapper && cargo near build
+cd pyth-compatible-wrapper && cargo near build
 
 # Deploy
-near contract deploy pyth-oracle-wrapper.testnet \
-  use-file res/pyth_wrapper.wasm \
+near contract deploy price-oracle-pyth.testnet \
+  use-file res/pyth_compatible_wrapper.wasm \
   with-init-call new \
   json-args '{"oracle_contract_id": "price-oracle.testnet", "stale_threshold": 60}' \
   prepaid-gas '10 Tgas' attached-deposit '0 NEAR' \
   network-config testnet sign-with-keychain send
 
 # Add price mappings
-near call pyth-oracle-wrapper.testnet add_price_mapping '{
+near call price-oracle-pyth.testnet add_price_mapping '{
   "price_id_hex": "c415de8d2efa7db216527dff4b60e8f3a5311c740dadb233e13e12547e226750",
   "asset_id": "wrap.near"
 }' --accountId OWNER --depositYocto 1 --networkId testnet
 
 # Fund wrapper for oracle calls
-near send OWNER pyth-oracle-wrapper.testnet 1
+near send OWNER price-oracle-pyth.testnet 1
 
 # Trigger price refresh
-near call pyth-oracle-wrapper.testnet refresh_prices '{}' --accountId ANYONE --deposit 0.02 --gas 300000000000000 --networkId testnet
+near call price-oracle-pyth.testnet refresh_prices '{}' --accountId ANYONE --deposit 0.02 --gas 300000000000000 --networkId testnet
 
 # Read price (view, free) — same API as pyth-oracle.near
-near view pyth-oracle-wrapper.testnet get_price '{
+near view price-oracle-pyth.testnet get_price '{
   "price_identifier": "c415de8d2efa7db216527dff4b60e8f3a5311c740dadb233e13e12547e226750"
 }' --networkId testnet
 ```
@@ -276,13 +280,13 @@ near view pyth-oracle-wrapper.testnet get_price '{
 
 For a protocol currently using `pyth-oracle.near`:
 
-1. Deploy `pyth-oracle-wrapper.near` (or use shared deployment)
+1. Deploy `price-oracle-pyth.near` (or use shared deployment)
 2. In your contract, change the Pyth contract address:
    ```rust
    // Before:
    const PYTH_CONTRACT: &str = "pyth-oracle.near";
    // After:
-   const PYTH_CONTRACT: &str = "pyth-oracle-wrapper.near";
+   const PYTH_CONTRACT: &str = "price-oracle-pyth.near";
    ```
 3. Keep `get_price(price_identifier)` calls as-is — same API, same types
 4. Remove `update_price_feeds` calls if desired (prices are auto-updated via scheduler)

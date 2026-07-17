@@ -14,7 +14,8 @@ Added optional `body` field to `CustomSourceConfig`:
 pub struct CustomSourceConfig {
     pub url: String,
     pub json_path: String,
-    pub value_type: ValueType,
+    #[serde(default = "default_value_type")]
+    pub value_type: String,
     pub method: String,
     pub headers: Vec<(String, String)>,
 
@@ -93,9 +94,13 @@ Set `API_KEY` environment variable (via NEAR OutLayer encrypted secrets):
 
 The worker will automatically:
 1. Read `API_KEY` from environment
-2. Add `Authorization: Bearer {API_KEY}` header to request
-3. Send POST request with JSON body
+2. Add `Authorization: Bearer {API_KEY}` header to every custom-source request (both GET and POST) whenever the `API_KEY` secret is set
+3. Send the request (POST with JSON body, or GET)
 4. Extract value from response using `json_path`
+
+### JSON Path
+
+`json_path` supports dot notation and numeric array indices, e.g. `result`, `blocks.0.author_account_id`, or `1245620.data.price_overview.final`.
 
 ## Testing
 
@@ -132,5 +137,5 @@ API_KEY="your-key" ./target/release/wasi-test \
 
 - Body is only sent for POST requests (ignored for GET)
 - If `body` is provided, `Content-Type: application/json` is auto-added (unless already specified)
-- API keys can be passed via `API_KEY` environment variable (automatically added as Bearer token)
+- API keys can be passed via `API_KEY` environment variable (automatically added as a Bearer token to every custom-source request, both GET and POST)
 - JSON path extraction works the same for both GET and POST responses

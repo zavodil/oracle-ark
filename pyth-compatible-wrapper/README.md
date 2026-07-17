@@ -1,5 +1,9 @@
 # Pyth-Compatible Wrapper for Oracle-Ark
 
+> **Legacy / optional.** This standalone wrapper contract is now legacy. The main Oracle-Ark contract `price-oracle.near` implements the Pyth receiver API **natively** (see `../contract/src/pyth.rs`). **Use the native Pyth methods on `price-oracle.near` unless you specifically need a separate contract address.**
+>
+> One behavioral difference: the native contract's `get_ema_price` returns a real EMA, whereas **this** wrapper's `get_ema_price` just returns the spot price (see this crate's `src/lib.rs`). Native Pyth price-feed mappings are managed via council actions `AddPriceMapping` / `RemovePriceMapping` / `SetPythStaleThreshold`.
+
 NEAR smart contract that implements the [Pyth receiver contract](https://github.com/pyth-network/pyth-crosschain/tree/main/target_chains/near/receiver) API, but internally uses [Oracle-Ark](https://github.com/zavodil/oracle-ark/tree/main/contract) (`price-oracle.near`) for price data.
 
 DeFi protocols currently using Pyth can switch to Oracle-Ark with **zero code changes** — just update the contract address.

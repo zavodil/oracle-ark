@@ -118,36 +118,42 @@ near view price-oracle.testnet get_price_data '{"asset_ids": ["wrap.near"]}' --n
    - Fix: Manually trigger an update via OutLayer dashboard
 
 2. **Prices expired** — `recency_duration_sec` is too short for update frequency.
-   - Fix: Increase `recency_duration_sec`:
+   - Fix: Increase `recency_duration_sec` via a council proposal (auto-executes when the approval threshold is met; if threshold == 1 it self-executes):
      ```bash
-     near call price-oracle.testnet set_recency_duration_sec '{"recency_duration_sec": 300}' \
-       --accountId OWNER --depositYocto 1 --networkId testnet
+     near call price-oracle.testnet create_proposal '{
+       "action": {"action": "set_recency_duration_sec", "recency_duration_sec": 300}
+     }' --accountId COUNCIL_MEMBER --depositYocto 1 --networkId testnet
      ```
 
 3. **Asset not registered** — Asset ID not added to contract.
-   - Fix: Add the asset:
+   - Fix: Add the asset via a council proposal (`push_signer_key` is the name of a TEE `PROTECTED_` secret used to sign price pushes, or `null` for warm-only):
      ```bash
-     near call price-oracle.testnet add_asset '{"asset_id": "wrap.near"}' \
-       --accountId OWNER --depositYocto 1 --networkId testnet
+     near call price-oracle.testnet create_proposal '{
+       "action": {"action": "add_asset", "asset_id": "wrap.near", "push_signer_key": null}
+     }' --accountId COUNCIL_MEMBER --depositYocto 1 --networkId testnet
      ```
 
 4. **Oracle not registered** — Contract's own account not registered as oracle.
-   - Fix: Add self as oracle:
+   - Fix: Add the oracle via a council proposal:
      ```bash
-     near call price-oracle.testnet add_oracle '{"account_id": "price-oracle.testnet"}' \
-       --accountId OWNER --depositYocto 1 --networkId testnet
+     near call price-oracle.testnet create_proposal '{
+       "action": {"action": "add_oracle", "account_id": "price-oracle.testnet"}
+     }' --accountId COUNCIL_MEMBER --depositYocto 1 --networkId testnet
      ```
 
 ### `oracle_call` panics with "OutLayer not configured"
 
-**Fix:** Configure OutLayer integration:
+**Fix:** Configure OutLayer integration via a council proposal:
 ```bash
-near call price-oracle.testnet configure_outlayer '{
-  "outlayer_contract_id": "outlayer.testnet",
-  "code_source": "{\"Project\": {\"project_id\": \"OWNER/PROJECT\"}}",
-  "secrets_profile": "default",
-  "secrets_account_id": "OWNER"
-}' --accountId OWNER --depositYocto 1 --networkId testnet
+near call price-oracle.testnet create_proposal '{
+  "action": {
+    "action": "configure_outlayer",
+    "outlayer_contract_id": "outlayer.testnet",
+    "code_source": "{\"Project\": {\"project_id\": \"OWNER/PROJECT\"}}",
+    "secrets_profile": "default",
+    "secrets_account_id": "OWNER"
+  }
+}' --accountId COUNCIL_MEMBER --depositYocto 1 --networkId testnet
 ```
 
 ### `oracle_call` panics with "Requires at least 0.01 NEAR"
@@ -161,9 +167,10 @@ near call price-oracle.testnet oracle_call '{...}' --deposit 0.02
 
 **Fix (option B):** Enable subsidy and fund the contract:
 ```bash
-# Enable subsidy
-near call price-oracle.testnet set_subsidize_outlayer_calls '{"enabled": true}' \
-  --accountId OWNER --depositYocto 1 --networkId testnet
+# Enable subsidy via a council proposal
+near call price-oracle.testnet create_proposal '{
+  "action": {"action": "set_subsidize_outlayer_calls", "enabled": true}
+}' --accountId COUNCIL_MEMBER --depositYocto 1 --networkId testnet
 
 # Fund contract (needs > 20 NEAR for subsidy to activate)
 near send OWNER price-oracle.testnet 25
@@ -171,20 +178,51 @@ near send OWNER price-oracle.testnet 25
 
 ### Contract upgrade fails
 
-**Symptoms:** `upgrade` call fails or contract state is broken after upgrade.
+**Symptoms:** Upgrade proposal fails, or contract state is broken after upgrade.
+
+There is no direct `upgrade` method. Upgrades run through the council in two steps: first upload the raw WASM via `upload_upgrade_code`, then create an `upgrade_contract` proposal referencing the code hash. On approval the contract deploys the stored code, optionally runs a migration method, and self-checks via `get_version`.
+
+**Upgrade flow:**
+```bash
+# 1. Upload the raw WASM as function-call input. Attach NEAR for storage (~1 NEAR per 100KB).
+#    Prints the SHA-256 code_hash you need for the proposal.
+near call price-oracle.testnet upload_upgrade_code \
+  --base64 "$(base64 -i contract/res/price_oracle.wasm)" \
+  --accountId COUNCIL_MEMBER --deposit 5 --gas 300000000000000 --networkId testnet
+
+# 2. Create the upgrade proposal with the code_hash from step 1.
+#    migrate_method is optional: use migrate_state / migrate_state2 / migrate_state3
+#    to run a state migration after deploy, or null to skip.
+near call price-oracle.testnet create_proposal '{
+  "action": {
+    "action": "upgrade_contract",
+    "code_hash": "CODE_HASH_FROM_STEP_1",
+    "migrate_method": "migrate_state3"
+  }
+}' --accountId COUNCIL_MEMBER --depositYocto 1 --gas 300000000000000 --networkId testnet
+```
+
+The proposal auto-executes once the approval threshold is met (self-executes if threshold == 1).
 
 **Prevention:**
 - Always keep previous WASM versions in `contract/res/`
 - Test upgrades on testnet first
 - Use versioned state (VAsset, VOracle enums) for backward compatibility
+- Pick the correct `migrate_method` for the state version you are migrating from
 
 **Recovery:**
 ```bash
-# Re-deploy previous version
-WASM_BASE64=$(base64 -i contract/res/price_oracle_0.5.0.wasm)
-near call price-oracle.testnet upgrade --base64 "$WASM_BASE64" \
-  --accountId OWNER --gas 300000000000000 --networkId testnet
+# Re-deploy a previous version through the same two-step flow.
+near call price-oracle.testnet upload_upgrade_code \
+  --base64 "$(base64 -i contract/res/price_oracle_0.5.0.wasm)" \
+  --accountId COUNCIL_MEMBER --deposit 5 --gas 300000000000000 --networkId testnet
+
+near call price-oracle.testnet create_proposal '{
+  "action": {"action": "upgrade_contract", "code_hash": "CODE_HASH_FROM_UPLOAD", "migrate_method": null}
+}' --accountId COUNCIL_MEMBER --depositYocto 1 --gas 300000000000000 --networkId testnet
 ```
+
+To discard an uploaded blob without deploying, call `remove_pending_upgrade_code '{"code_hash": "..."}'` (refunds the storage deposit to the uploader).
 
 ---
 
@@ -194,12 +232,17 @@ near call price-oracle.testnet upgrade --base64 "$WASM_BASE64" \
 
 **Symptoms:** First execution takes too long or fails with compilation error.
 
-**Fix:** Use `ExecutionSource::Project` instead of GitHub source to skip compilation:
+**Fix:** Use `ExecutionSource::Project` instead of GitHub source to skip compilation, via a council proposal:
 ```bash
-near call price-oracle.testnet configure_outlayer '{
-  "outlayer_contract_id": "outlayer.testnet",
-  "code_source": "{\"Project\": {\"project_id\": \"OWNER/oracle-ark\"}}"
-}' --accountId OWNER --depositYocto 1 --networkId testnet
+near call price-oracle.testnet create_proposal '{
+  "action": {
+    "action": "configure_outlayer",
+    "outlayer_contract_id": "outlayer.testnet",
+    "code_source": "{\"Project\": {\"project_id\": \"OWNER/oracle-ark\"}}",
+    "secrets_profile": null,
+    "secrets_account_id": null
+  }
+}' --accountId COUNCIL_MEMBER --depositYocto 1 --networkId testnet
 ```
 
 Or upload WASM to FastFS/IPFS and use `WasmUrl`:
@@ -298,13 +341,15 @@ near call price-oracle-wrapper.testnet predict \
 
 ### Binance API blocked in some regions
 
-**Fix:** Use alternative exchanges or configure proxy. The oracle fetches from 7+ sources, so individual source failures are tolerable as long as `min_sources_num` is met.
+**Fix:** Use alternative exchanges or configure proxy. The oracle fetches from 10 sources (coingecko, binance, binance_us, binance_alpha, pyth, chainlink, huobi, kucoin, gate, cryptocom), so individual source failures are tolerable as long as `min_sources_num` is met.
 
 ### Pyth price feed ID not found
 
 **Symptoms:** Pyth returns empty or error.
 
 **Fix:** Verify the Pyth price feed ID at https://pyth.network/price-feeds. IDs are hex strings starting with `0x`.
+
+**Note:** Pyth is the only source with a source-side staleness check — prices whose `publish_time` is older than 120s are rejected.
 
 ---
 

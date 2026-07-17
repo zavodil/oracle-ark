@@ -471,7 +471,7 @@ Example — fetch game price from Steam:
 
 ## Price Sources
 
-9 exchanges + custom sources:
+10 exchanges + custom sources:
 
 | Source | Type | API Key | Example Tokens |
 |--------|------|---------|----------------|
@@ -479,6 +479,7 @@ Example — fetch game price from Steam:
 | **Binance** | REST | No | `BTCUSDT`, `ETHUSDT` |
 | **Binance US** | REST | No | `BTCUSD`, `ETHUSD` |
 | **Pyth Network** | REST | No | Price feed IDs |
+| **Chainlink** | Ethereum RPC | No | Aggregator contract address |
 | **Huobi** | REST | No | `btcusdt`, `ethusdt` |
 | **KuCoin** | REST | No | `BTC-USDT`, `ETH-USDT` |
 | **Gate.io** | REST | No | `btc_usdt`, `eth_usdt` |
@@ -497,7 +498,7 @@ Example — fetch game price from Steam:
 | `get_price_data` | Free | N/A | N/A |
 | `get_oracle_price_data` | Free | N/A | N/A |
 | `request_price_data` | Free | 0.01+ NEAR | Free |
-| `oracle_call` | 1 yoctoNEAR | 0.01+ NEAR | Free |
+| `oracle_call` | None (refunded) | 0.01+ NEAR | Free |
 | `request_custom_data` | N/A | 0.01+ NEAR | Free |
 | `custom_call` | N/A | 0.01+ NEAR | Free |
 

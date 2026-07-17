@@ -19,7 +19,7 @@ Oracle-Ark provides verifiable price feeds for DeFi applications. Prices are fet
 
 ```rust
 pub struct Price {
-    pub multiplier: u128,  // Price value as integer
+    pub multiplier: u128,  // Price value; serialized as a decimal STRING in JSON (e.g. "500000000")
     pub decimals: u8,      // Decimal places (e.g., 8 for USD)
 }
 ```
@@ -41,7 +41,7 @@ Response from `get_price_data` and `oracle_call` callback:
 
 ```rust
 pub struct PriceData {
-    pub timestamp: u64,              // Block timestamp (nanoseconds)
+    pub timestamp: u64,              // Block timestamp in ns; serialized as a STRING in JSON
     pub recency_duration_sec: u32,   // Max age for fresh prices
     pub prices: Vec<AssetOptionalPrice>,
 }
@@ -192,7 +192,7 @@ near call price-oracle.testnet oracle_call '{
 - `resource_limits` (optional): OutLayer execution limits (see below)
 
 **Deposit requirements:**
-- If prices are **fresh** (in cache): 1 yoctoNEAR
+- If prices are **fresh** (in cache): no deposit required (any attached deposit is refunded)
 - If prices are **stale** (need OutLayer): 0.01+ NEAR
 - If **subsidized mode** active: no deposit required
 
@@ -489,32 +489,46 @@ near view price-oracle.near get_price_data '{"asset_ids": ["wrap.near#3600"]}'
 near view price-oracle.near get_price_data '{"asset_ids": ["wrap.near#86400"]}'
 ```
 
-EMA must be configured by contract owner first:
+EMA must be configured via a council/DAO proposal first — there is no direct owner method:
 ```bash
-near call price-oracle.near add_asset_ema '{"asset_id": "wrap.near", "period_sec": 3600}' \
-  --accountId owner.near --depositYocto 1
+# A council member proposes AddAssetEma; it executes once the vote threshold is met
+near call price-oracle.near create_proposal '{"action": {"action": "add_asset_ema", "asset_id": "wrap.near", "period_sec": 3600}}' \
+  --accountId council-member.near --depositYocto 1
 ```
 
 > **Compatibility:** EMA feature from NEAR Native Price Oracle.
 
 ## Public Storage (Direct Access)
 
-Prices are also cached in OutLayer public storage for direct HTTP access:
+Prices are also cached in OutLayer public storage for direct HTTP access. Reads go
+through the batch endpoint (`project_uuid` = the OutLayer project, `p0000000000000003`
+for `price-oracle.near/price-oracle`):
 
 ```bash
-# Read price without blockchain call
-curl "https://api.outlayer.fastnear.com/storage/owner.near/oracle-ark/price:wrap.near"
+# Read one or more keys without a blockchain call
+curl -X POST "https://api.outlayer.fastnear.com/public/storage/batch" \
+  -H "Content-Type: application/json" \
+  -d '{"project_uuid": "p0000000000000003", "keys": ["price:wrap.near"]}'
 ```
 
-Response:
+Response — values are base64-encoded JSON:
 ```json
 {
-  "price": { "multiplier": "500000000", "decimals": 8 },
+  "results": {
+    "price:wrap.near": { "exists": true, "value": "<base64 of the object below>" }
+  }
+}
+```
+
+Decoded value (a `StoredPrice` — note `price` is a plain number, not a multiplier/decimals pair):
+```json
+{
+  "price": 5.00,
   "timestamp": 1706889600,
   "sources": [
-    { "name": "coingecko", "price": 5.01 },
-    { "name": "binance", "price": 4.99 },
-    { "name": "pyth", "price": 5.00 }
+    { "name": "coingecko", "price": 5.01, "timestamp": 1706889600 },
+    { "name": "binance", "price": 4.99, "timestamp": 1706889600 },
+    { "name": "pyth", "price": 5.00, "timestamp": 1706889598 }
   ],
   "aggregation_method": "median"
 }
@@ -576,7 +590,7 @@ Oracle-Ark maintains full backward compatibility with [NearDeFi/price-oracle](ht
 - `request_custom_data` - Fetch custom data directly without callback
 - `custom_call` - Fetch custom data with callback
 - `can_subsidize_outlayer_calls` - Check subsidization status
-- `configure_outlayer` - Owner-only setup
+- `ConfigureOutlayer` - a council/DAO proposal action (not a direct owner method)
 
 ## Links
 

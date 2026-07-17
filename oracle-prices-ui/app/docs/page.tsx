@@ -7,6 +7,7 @@ const sections = [
   { id: 'overview', name: 'Overview' },
   { id: 'quick-start', name: 'Quick Start' },
   { id: 'governance', name: 'Governance & Security' },
+  { id: 'data-freshness', name: 'Data Freshness & Attestation' },
   { id: 'pyth-native', name: 'Pyth Interface' },
   { id: 'direct-outlayer', name: 'Direct OutLayer Integration' },
   { id: 'price-oracle', name: 'Price Oracle Contract' },
@@ -236,8 +237,8 @@ Result: No human holds the signing key. Only verified TEE code can push prices.`
                       <td className="py-3 px-4">Set OutLayer integration parameters</td>
                     </tr>
                     <tr className="border-b border-dark-800">
-                      <td className="py-3 px-4"><code className="text-primary">ProposeUpgrade / ExecuteUpgrade</code></td>
-                      <td className="py-3 px-4">Two-phase contract upgrade via DAO vote</td>
+                      <td className="py-3 px-4"><code className="text-primary">UpgradeContract</code></td>
+                      <td className="py-3 px-4">Contract upgrade via DAO vote (after <code>upload_upgrade_code</code>)</td>
                     </tr>
                   </tbody>
                 </table>
@@ -253,6 +254,78 @@ Result: No human holds the signing key. Only verified TEE code can push prices.`
                 <li>Fund the derived implicit account with NEAR</li>
                 <li>Scheduler pushes prices autonomously from TEE</li>
               </ol>
+            </section>
+
+            {/* Data Freshness & Attestation */}
+            <section id="data-freshness" className="mb-16">
+              <h2 className="text-2xl font-bold text-white mb-6">Data Freshness & Attestation</h2>
+
+              <p className="text-dark-300 mb-6">
+                Every result is attested by OutLayer&apos;s TEE: the signature proves <em>this WASM binary produced this output inside Intel TDX</em>.
+                For the full trust model — what the signature does and does not prove, and how to verify it — see the{' '}
+                <a href="https://outlayer.fastnear.com/docs/tee-attestation" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">platform attestation docs</a>.
+                This section covers what is specific to the oracle.
+              </p>
+
+              <h3 className="text-lg font-semibold text-white mb-4">Two ways prices reach your contract</h3>
+              <div className="grid md:grid-cols-2 gap-4 mb-8">
+                <div className="card">
+                  <h4 className="text-white font-semibold mb-2">Pull — yield/resume</h4>
+                  <p className="text-dark-400 text-sm">
+                    Your contract calls <code className="text-primary">oracle_call</code> / <code className="text-primary">request_price_data</code>.
+                    If the on-chain cache is fresh it returns immediately; if stale, the contract yields, the TEE fetches and returns prices inline, and execution resumes with the result.
+                  </p>
+                </div>
+                <div className="card">
+                  <h4 className="text-white font-semibold mb-2">Push — scheduled</h4>
+                  <p className="text-dark-400 text-sm">
+                    An off-chain scheduler triggers the TEE worker, which fetches, aggregates, and signs <code className="text-primary">report_prices</code> with a{' '}
+                    <code className="text-primary">PROTECTED_</code> key generated inside the TEE. Prices stay warm in contract state for free <code className="text-primary">get_price_data</code> reads.
+                  </p>
+                </div>
+              </div>
+
+              <h3 className="text-lg font-semibold text-white mb-4">Generation time vs. source age</h3>
+              <p className="text-dark-300 mb-4">
+                A price is timestamped when the runner <em>read</em> the source, not by the age of the source&apos;s own data.
+                Only Pyth exposes an upstream publish time that the oracle enforces; every other endpoint returns a value with no timestamp, so its reading is only as fresh as the fetch.
+              </p>
+              <div className="card mb-8 overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="border-b border-dark-700 text-left text-dark-300">
+                      <th className="py-2 px-4">Source</th>
+                      <th className="py-2 px-4">Upstream timestamp</th>
+                      <th className="py-2 px-4">Staleness check</th>
+                    </tr>
+                  </thead>
+                  <tbody className="text-dark-400">
+                    <tr className="border-b border-dark-800">
+                      <td className="py-3 px-4"><code className="text-primary">pyth</code></td>
+                      <td className="py-3 px-4">Yes (<code>publish_time</code>)</td>
+                      <td className="py-3 px-4">Rejected if older than 120s</td>
+                    </tr>
+                    <tr className="border-b border-dark-800">
+                      <td className="py-3 px-4">all others (coingecko, binance, chainlink, huobi, kucoin, gate, cryptocom, …)</td>
+                      <td className="py-3 px-4">No</td>
+                      <td className="py-3 px-4">Stamped with fetch time</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+
+              <h3 className="text-lg font-semibold text-white mb-4">On-chain freshness bounds</h3>
+              <p className="text-dark-300 mb-4">
+                Reads from contract state are bounded by several on-chain checks, so a consumer never silently gets an ancient value:
+              </p>
+              <ul className="list-disc list-inside text-dark-300 space-y-2 mb-4">
+                <li><code className="text-primary">recency_duration_sec</code> — reports older than this window are ignored; a stale asset returns <code>price: null</code>.</li>
+                <li>Majority-of-oracles quorum — a price is returned only if enough recent reports agree (median of recent reports).</li>
+                <li><code className="text-primary">pyth_stale_threshold</code> (default 60s) — enforced by the Pyth-compatible getters.</li>
+              </ul>
+              <p className="text-dark-400 text-sm">
+                For a cross-chain view call, include the source block height in the WASI output so your contract can enforce its own deadline — OutLayer attests whatever the program returns.
+              </p>
             </section>
 
             {/* Native Pyth Interface */}
@@ -546,7 +619,7 @@ or go direct for full customization.`}
                     <tr className="border-b border-dark-800">
                       <td className="py-3 px-4"><code className="text-primary">get_price_data</code></td>
                       <td className="py-3 px-4"><code>asset_ids?: string[]</code></td>
-                      <td className="py-3 px-4">Get cached prices (returns null if cache empty)</td>
+                      <td className="py-3 px-4">Get cached prices. Always returns a PriceData object; per-asset price is null when stale/unavailable</td>
                     </tr>
                     <tr className="border-b border-dark-800">
                       <td className="py-3 px-4"><code className="text-primary">can_subsidize_outlayer_calls</code></td>

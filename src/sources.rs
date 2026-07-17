@@ -52,6 +52,10 @@ pub fn fetch_custom_value(config: &CustomSourceConfig) -> Result<serde_json::Val
 
 /// Internal: fetch raw JSON value from custom source
 fn fetch_custom_raw(config: &CustomSourceConfig) -> Result<serde_json::Value, Box<dyn Error>> {
+    // Block requests to local/private network resources (SSRF guard).
+    // Standard sources use hard-coded URLs; only custom sources take a caller-supplied URL.
+    crate::security::validate_url(&config.url)?;
+
     // Build HTTP request
     let mut request = match config.method.to_uppercase().as_str() {
         "GET" => Client::new().get(&config.url),

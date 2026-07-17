@@ -13,13 +13,13 @@ External APIs                    Scheduler (VPS)                TEE Worker (Phal
 ─────────────                    ───────────────                ────────────────────────
 CoinGecko ─┐                     ┌─────────────┐               ┌──────────────────────┐
 Binance   ─┤  compare prices     │ Poll loop   │  read stored  │ Public Storage       │
-Pyth      ─┼──────────────────>  │ (every 10s) │ <──────────── │  price:wrap.near     │
+Pyth      ─┼──────────────────>  │ (every 5s)  │ <──────────── │  price:wrap.near     │
 KuCoin    ─┤                     │             │   prices      │  price:aurora        │
 Gate.io   ─┤                     │  if delta > │               │  price:nbtc...       │
 Huobi     ─┤                     │  threshold: │               │                      │
 Crypto.com─┘                     │             │  trigger      │ WASI Binary          │
                                  │  call WASI  │ ────────────> │  fetches own prices  │
-                                 │  (no data!) │  update       │  from all 9 sources  │
+                                 │  (no data!) │  update       │  from all 10 sources │
                                  └─────────────┘               │  aggregates (median) │
                                                                │  writes to storage   │
                                                                └──────────────────────┘
@@ -29,7 +29,7 @@ Crypto.com─┘                     │             │  trigger      │ WASI 
 
 1. **TEE worker** (WASI binary inside Intel TDX enclave) holds fresh prices in its public storage. When any user or contract requests a price, the worker returns the cached result immediately — no external API calls at request time.
 
-2. **Scheduler** runs **outside TEE** on a separate VPS. Every 10 seconds it:
+2. **Scheduler** runs **outside TEE** on a separate VPS. Every 5s (configurable via `POLL_INTERVAL_SECS`) it:
    - Fetches current prices from external sources (CoinGecko, Binance, Pyth, etc.) for comparison
    - Reads the TEE worker's stored prices via OutLayer public storage batch API
    - Compares the two and decides whether an update is needed
@@ -59,6 +59,8 @@ Set `UPDATE_CONTRACT_ENABLED=true` to have the TEE worker also call `report_pric
 
 Each on-chain update costs gas, so this mode is **disabled by default**. Enable it only when on-chain price availability is required.
 
+Setting `UPDATE_CONTRACT_ENABLED=true` also **requires** `ORACLE_CONTRACT_ID` plus `SECRETS_PROFILE` and `SECRETS_ACCOUNT_ID`. Without these, the WASI binary runs without the `PROTECTED_` signing keys and no on-chain push happens (public storage is still updated).
+
 ## Setup
 
 ### 1. Copy environment file
@@ -82,23 +84,14 @@ PROJECT_UUID=p0000000000000001
 PAYMENT_KEY=alice.near:0:your_secret_key_here
 ```
 
-### 3. Configure tokens
+### 3. Exchange configs (no local file)
 
-The scheduler shares `tokens.json` with the WASI binary (default path: `../tokens.json`). Each token entry defines which exchanges to query:
+The scheduler reads exchange configs from OutLayer public storage under the key `config:assets` (fetched via the public-storage batch API and cached for ~10 minutes). There is no local `tokens.json` to maintain.
 
-```json
-{
-  "wrap.near": {
-    "decimals": 24,
-    "coingecko": "near",
-    "binance": "NEARUSDT",
-    "pyth": "0xc415de8d...",
-    "huobi": "nearusdt",
-    "kucoin": "NEAR-USDT",
-    "gate": "near_usdt",
-    "cryptocom": "NEAR_USDT"
-  }
-}
+This requires `sync_asset_configs` to have been called on the oracle contract first, so that `config:assets` is populated. On startup the scheduler logs:
+
+```
+INFO  Exchange configs: loaded from public storage (config:assets)
 ```
 
 ### 4. Run
@@ -126,11 +119,18 @@ cargo run --release
 | `PROJECT_NAME` | required | OutLayer project name |
 | `PROJECT_UUID` | required | Project UUID for public storage reads |
 | `PAYMENT_KEY` | required | Payment key (format: `owner:nonce:secret`) |
-| `TOKENS_CONFIG` | `../tokens.json` | Path to shared token configuration |
-| `UPDATE_INTERVAL_SECS` | `60` | Max staleness before refresh (seconds) |
+| `UPDATE_INTERVAL_SECS` | `60` | Max staleness before refresh, full asset set (seconds) |
+| `UPDATE_INTERVAL_PRIORITY_SECS` | `10` | Max staleness before refresh for priority assets (seconds) |
+| `POLL_INTERVAL_SECS` | `5` | How often the poll loop runs (seconds) |
+| `PRIORITY_ASSETS` | `wrap.near,nbtc.bridge.near,aurora` | Comma-separated assets refreshed on the priority interval |
 | `PRICE_DIFF_THRESHOLD_PERCENT` | `1.0` | Price change % that triggers immediate refresh |
+| `NEAR_RPC_URL` | `https://rpc.mainnet.fastnear.com` | NEAR RPC endpoint |
 | `UPDATE_CONTRACT_ENABLED` | `false` | Also push prices to on-chain contract (costs gas) |
 | `ORACLE_CONTRACT_ID` | — | Contract to update (required if above is true) |
+| `ORACLE_SIGNER_ACCOUNT` | — | Account used to sign on-chain oracle updates |
+| `ORACLE_MIN_BALANCE_NEAR` | `0.05` | Minimum signer balance before alerting (NEAR) |
+| `SECRETS_PROFILE` | — | Secrets profile injected into WASI (required for on-chain push) |
+| `SECRETS_ACCOUNT_ID` | — | Account owning the secrets profile (required for on-chain push) |
 | `AGGREGATION_METHOD` | `median` | Aggregation: `median` / `average` / `weighted_average` |
 | `MIN_SOURCES_NUM` | `1` | Minimum sources required for valid price |
 | `API_KEY` | — | API key for premium price sources (CoinGecko Pro, etc.) |
@@ -154,8 +154,8 @@ The scheduler logs all decisions at `info` level:
 
 ```
 INFO  Starting oracle scheduler
-INFO  Tokens: 13 configured
-INFO  Update interval: 60s, threshold: 1%
+INFO  Exchange configs: loaded from public storage (config:assets)
+INFO  Update intervals: priority=10s, full=60s, poll=5s, threshold=1%
 INFO  wrap.near: triggering update (reason: price change, current=5.1234)
 INFO  Triggering WASI update for 3 tokens
 INFO  Triggering WASI update successful
@@ -180,12 +180,21 @@ POST {COORDINATOR_URL}/public/storage/batch
 }
 ```
 
-Returns base64-encoded JSON for each key:
+Returns an envelope keyed by storage key; each `value` is base64-encoded JSON:
+```json
+{
+  "results": {
+    "price:wrap.near": { "exists": true, "value": "<base64>" }
+  }
+}
+```
+
+The decoded `value` is a `StoredPrice`:
 ```json
 {
   "price": 5.0123,
   "timestamp": 1706900000000000000,
-  "sources": [{"name": "binance", "price": 5.01}, {"name": "coingecko", "price": 5.02}],
+  "sources": [{"name": "binance", "price": 5.01, "timestamp": 1706900000000000000}],
   "aggregation_method": "median"
 }
 ```
@@ -201,10 +210,18 @@ X-Payment-Key: {PAYMENT_KEY}
     "tokens": ["wrap.near", "aurora"],
     "update_contract": false,
     "aggregation_method": "median",
-    "min_sources_num": 1
+    "min_sources_num": 1,
+    "contract_id": "oracle.near"
   },
-  "async": false
+  "resource_limits": {
+    "max_execution_seconds": 60
+  },
+  "async": true
 }
 ```
+
+When on-chain push is enabled, the request also carries `oracle_keys` and a top-level `secrets_ref` so the worker can sign the contract update inside TEE.
+
+Because the call is submitted with `"async": true`, the coordinator returns a `call_id`; the scheduler then polls `GET {COORDINATOR_URL}/calls/{call_id}` until the update completes.
 
 Note: the `input` contains only the token list and configuration — **no price data**. The TEE worker fetches prices independently.

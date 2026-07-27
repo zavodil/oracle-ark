@@ -85,17 +85,23 @@ fn blend(bid: Option<f64>, ask: Option<f64>, last: Option<f64>) -> Option<f64> {
     }
 }
 
+/// CoinGecko serves paid keys on a different host: sending `x_cg_pro_api_key` to the free host
+/// fails the request outright with HTTP 400 ("please change your root URL to pro-api.coingecko.com"),
+/// so the host has to follow the key.
+pub const COINGECKO_FREE_HOST: &str = "https://api.coingecko.com";
+pub const COINGECKO_PRO_HOST: &str = "https://pro-api.coingecko.com";
+
 /// Build CoinGecko API URL
 pub fn coingecko_url(token_id: &str, api_key: Option<&str>) -> String {
     if let Some(key) = api_key {
         format!(
-            "https://api.coingecko.com/api/v3/simple/price?ids={}&vs_currencies=usd&x_cg_pro_api_key={}",
-            token_id, key
+            "{}/api/v3/simple/price?ids={}&vs_currencies=usd&x_cg_pro_api_key={}",
+            COINGECKO_PRO_HOST, token_id, key
         )
     } else {
         format!(
-            "https://api.coingecko.com/api/v3/simple/price?ids={}&vs_currencies=usd",
-            token_id
+            "{}/api/v3/simple/price?ids={}&vs_currencies=usd",
+            COINGECKO_FREE_HOST, token_id
         )
     }
 }
@@ -116,13 +122,13 @@ pub fn coingecko_batch_url(ids: &[&str], api_key: Option<&str>) -> String {
     let ids = ids.join(",");
     if let Some(key) = api_key {
         format!(
-            "https://api.coingecko.com/api/v3/simple/price?ids={}&vs_currencies=usd&include_last_updated_at=true&x_cg_pro_api_key={}",
-            ids, key
+            "{}/api/v3/simple/price?ids={}&vs_currencies=usd&include_last_updated_at=true&x_cg_pro_api_key={}",
+            COINGECKO_PRO_HOST, ids, key
         )
     } else {
         format!(
-            "https://api.coingecko.com/api/v3/simple/price?ids={}&vs_currencies=usd&include_last_updated_at=true",
-            ids
+            "{}/api/v3/simple/price?ids={}&vs_currencies=usd&include_last_updated_at=true",
+            COINGECKO_FREE_HOST, ids
         )
     }
 }

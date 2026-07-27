@@ -135,10 +135,16 @@ impl Config {
                 .unwrap_or_else(|_| "1.0".to_string())
                 .parse()
                 .unwrap_or(1.0),
+            // Default high on purpose: the worker now fetches one batch request PER SOURCE for the
+            // whole token set, so splitting the set into groups multiplies those requests instead
+            // of parallelising work — N groups means N full pulls of every all-tickers endpoint
+            // (Coinbase alone is ~107 KB) and pushes rate-limited sources like CoinGecko over the
+            // edge, which shows up as some assets silently missing a source. One group = one
+            // request per source. Lower it only if a single call approaches the execution limit.
             group_max_tokens: env::var("GROUP_MAX_TOKENS")
-                .unwrap_or_else(|_| "4".to_string())
+                .unwrap_or_else(|_| "64".to_string())
                 .parse()
-                .unwrap_or(4),
+                .unwrap_or(64),
             fetch_concurrency: env::var("FETCH_CONCURRENCY")
                 .unwrap_or_else(|_| "3".to_string())
                 .parse()
@@ -229,6 +235,9 @@ async fn main() -> Result<()> {
     let config = Config::from_env()?;
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(30)) // All requests are short (async submit + poll)
+        // CoinGecko rejects requests with no User-Agent (HTTP 403), and the scheduler queries the
+        // same sources as the worker for its price comparison.
+        .user_agent("oracle-ark-scheduler/1.0 (+https://github.com/zavodil/oracle-ark)")
         .build()?;
 
     info!("Starting oracle scheduler");

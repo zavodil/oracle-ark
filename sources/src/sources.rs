@@ -18,6 +18,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 /// NOTE: `wasi-http-client` 0.2 exposes ONLY a connect timeout — there is no read/total timeout.
 /// A server that accepts the connection and then stalls cannot be bounded here; the backstop is
 /// the per-call `max_execution_seconds` limit the scheduler sets on each WASI invocation.
+/// Some providers reject requests without a descriptive User-Agent — CoinGecko answers HTTP 403
+/// ("Please add a descriptive User-Agent to your request"). The WASI HTTP client sends none by
+/// default, so every outbound request sets one explicitly.
+pub const USER_AGENT: &str = "oracle-ark/1.0 (+https://github.com/zavodil/oracle-ark)";
+
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 
 fn current_timestamp() -> u64 {
@@ -54,6 +59,7 @@ pub mod sync {
     fn http_get(url: &str) -> Result<HttpResponse> {
         let response = Client::new()
             .get(url)
+            .header("User-Agent", USER_AGENT)
             .connect_timeout(CONNECT_TIMEOUT)
             .send()?;
 
@@ -112,6 +118,7 @@ pub mod sync {
         // Binance API returns gzip-compressed data by default, request identity encoding
         let response = Client::new()
             .get(&url)
+            .header("User-Agent", USER_AGENT)
             .header("Accept-Encoding", "identity")
             .connect_timeout(CONNECT_TIMEOUT)
             .send()?;
@@ -160,6 +167,7 @@ pub mod sync {
     ) -> std::result::Result<f64, ChainlinkError> {
         let response = Client::new()
             .post(rpc_url)
+            .header("User-Agent", USER_AGENT)
             .header("Content-Type", "application/json")
             .connect_timeout(CONNECT_TIMEOUT)
             .body(body_str.as_bytes())
@@ -380,9 +388,11 @@ pub mod sync {
 
     pub fn fetch_custom(config: &CustomSourceConfig, api_key: Option<&str>) -> Result<SourcePrice> {
         let mut request = match config.method.to_uppercase().as_str() {
-            "GET" => Client::new().get(&config.url),
+            "GET" => Client::new().get(&config.url)
+            .header("User-Agent", USER_AGENT),
             "POST" => {
-                let mut req = Client::new().post(&config.url);
+                let mut req = Client::new().post(&config.url)
+            .header("User-Agent", USER_AGENT);
                 if let Some(body) = &config.body {
                     let body_str = serde_json::to_string(body)?;
                     req = req.body(body_str.as_bytes());
@@ -547,6 +557,7 @@ pub mod sync {
     fn http_get_text_with_status(url: &str) -> Result<(u16, String)> {
         let response = Client::new()
             .get(url)
+            .header("User-Agent", USER_AGENT)
             .connect_timeout(CONNECT_TIMEOUT)
             .send()?;
 
@@ -641,6 +652,7 @@ pub mod sync {
         let url = parsers::binance_alpha_url();
         let response = Client::new()
             .get(&url)
+            .header("User-Agent", USER_AGENT)
             .header("Accept-Encoding", "identity")
             .connect_timeout(CONNECT_TIMEOUT)
             .send()?;
@@ -668,6 +680,7 @@ pub mod sync {
     ) -> Result<parsers::ChainlinkBatch> {
         let response = Client::new()
             .post(rpc_url)
+            .header("User-Agent", USER_AGENT)
             .header("Content-Type", "application/json")
             .connect_timeout(CONNECT_TIMEOUT)
             .body(body_str.as_bytes())

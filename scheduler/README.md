@@ -36,7 +36,9 @@ Crypto.com─┘                     │             │  trigger      │ WASI 
 
 3. **Triggering an update**: the scheduler sends a `call` request to the OutLayer coordinator with command `update_prices` and the list of tokens to refresh. **The scheduler does NOT send price data** — it only tells the TEE worker *which* tokens need updating. The worker then fetches prices from all configured sources independently inside the enclave, aggregates them, and writes the result to public storage.
 
-   The refresh is split into **groups that run concurrently** (`GROUP_MAX_TOKENS`, `FETCH_CONCURRENCY`). The worker queries its sources sequentially, so a single call carrying every token is the slow path; grouping keeps a cycle short. Each group writes its own tokens as it finishes, so one failing group never discards the others' work — the failure is alerted and the healthy groups still commit.
+   The worker fetches in **batches: one HTTP request per source covering every requested token**, not one per (token, source). A refresh should therefore be a **single call for the whole asset set** — that is one request per source per cycle.
+
+   `GROUP_MAX_TOKENS` (default 64) exists only as an escape hatch and should stay **above the number of tracked assets**. Splitting the set into groups does not parallelise work here, it *multiplies* requests: N groups means N full pulls of every all-tickers endpoint (Coinbase alone is ~107 KB) and pushes rate-limited sources such as CoinGecko over their limit — which surfaces as assets silently missing a source rather than as an error. `FETCH_CONCURRENCY` then bounds how many groups may be in flight if you ever do lower it. When more than one group runs, each writes its own tokens as it finishes, so a failing group never discards the others' work — the failure is alerted and the healthy groups still commit.
 
 4. **Pushing on-chain** (optional) runs as a **separate, much slower phase** — see below.
 
@@ -137,7 +139,7 @@ cargo run --release
 | `POLL_INTERVAL_SECS` | `5` | How often the poll loop runs (seconds) |
 | `PRIORITY_ASSETS` | `wrap.near,nbtc.bridge.near,aurora` | Comma-separated assets refreshed on the priority interval |
 | `PRICE_DIFF_THRESHOLD_PERCENT` | `1.0` | Price change % that triggers immediate refresh |
-| `GROUP_MAX_TOKENS` | `4` | Max tokens per WASI cache-refresh call |
+| `GROUP_MAX_TOKENS` | `64` | Max tokens per refresh call — keep above the asset count so one batch request per source is made |
 | `FETCH_CONCURRENCY` | `3` | How many refresh groups run concurrently |
 | `NEAR_RPC_URL` | `https://rpc.mainnet.fastnear.com` | NEAR RPC endpoint |
 | `UPDATE_CONTRACT_ENABLED` | `false` | Also push prices to on-chain contract (costs gas) |

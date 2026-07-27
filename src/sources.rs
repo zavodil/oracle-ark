@@ -12,6 +12,10 @@ use wasi_http_client::Client;
 /// Connect timeout for custom-source requests. See the note in `oracle-ark-sources`: the client
 /// offers no read/total timeout, so this only bounds the connect phase; a stalled-after-connect
 /// server is bounded by the WASI call's `max_execution_seconds`.
+/// See `oracle_ark_sources::sources::USER_AGENT` — providers such as CoinGecko
+/// reject requests that carry no User-Agent.
+const USER_AGENT: &str = "oracle-ark/1.0 (+https://github.com/zavodil/oracle-ark)";
+
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Fetch price from custom user-defined source (returns f64)
@@ -63,9 +67,9 @@ fn fetch_custom_raw(config: &CustomSourceConfig) -> Result<serde_json::Value, Bo
 
     // Build HTTP request
     let mut request = match config.method.to_uppercase().as_str() {
-        "GET" => Client::new().get(&config.url),
+        "GET" => Client::new().get(&config.url).header("User-Agent", USER_AGENT),
         "POST" => {
-            let mut req = Client::new().post(&config.url);
+            let mut req = Client::new().post(&config.url).header("User-Agent", USER_AGENT);
 
             // Add body if provided
             if let Some(body) = &config.body {

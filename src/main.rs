@@ -1,5 +1,6 @@
 mod near_tx;
 mod security;
+mod signed_prices;
 mod sources;
 mod storage_types;
 mod telegram;
@@ -7,7 +8,7 @@ mod types;
 
 use oracle_ark_sources::parsers;
 use oracle_ark_sources::sources::sync as shared_sources;
-use oracle_ark_sources::ExchangeConfig;
+use oracle_ark_sources::{ExchangeConfig, SourcePrice};
 use outlayer::storage;
 use storage_types::{SourceInfo, StoredPrice};
 use types::*;
@@ -49,6 +50,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 min_sources_num,
             } => {
                 let response = handle_get_prices(&tokens, max_age_secs, aggregation_method, min_sources_num);
+                serde_json::to_string(&response)?
+            }
+            OracleCommand::GetSignedPrices {
+                tokens,
+                max_age_secs,
+                key_name,
+                aliases,
+                sig_format,
+                expo,
+                exclude_sources,
+                aggregation_method,
+                min_sources_num,
+            } => {
+                let response = handle_get_signed_prices(
+                    &tokens,
+                    max_age_secs,
+                    &key_name,
+                    aliases.as_ref(),
+                    sig_format.as_deref(),
+                    expo,
+                    exclude_sources.as_deref(),
+                    aggregation_method,
+                    min_sources_num,
+                );
                 serde_json::to_string(&response)?
             }
             OracleCommand::ForceUpdate {
@@ -185,24 +210,30 @@ fn handle_update_prices(
     // Get universal API key from environment (used for CoinGecko, etc.)
     let api_key = env::var("API_KEY").ok();
 
+    // ONE request per distinct source for the whole token set — at most 10 — instead of the
+    // ~66 (token, source) round-trips this used to issue. Storage still happens per token
+    // below, so a failure part-way through leaves the tokens handled before it updated.
+    let batched = shared_sources::fetch_all_sources_batch(
+        &configs_for(tokens.iter().map(String::as_str), &configs),
+        api_key.as_deref(),
+    );
+
     for token in tokens {
         let token = token.to_string();
-        let config = match configs.get(&token) {
-            Some(c) => c,
-            None => {
-                results.push(PriceResult {
-                    token,
-                    price: None,
-                    timestamp: None,
-                    sources: None,
-                    from_cache: None,
-                    error: Some("Token not in exchange config".to_string()),
-                });
-                continue;
-            }
-        };
+        if !configs.contains_key(&token) {
+            results.push(PriceResult {
+                token,
+                price: None,
+                timestamp: None,
+                sources: None,
+                from_cache: None,
+                error: Some("Token not in exchange config".to_string()),
+            });
+            continue;
+        }
 
-        match fetch_and_store_price(&token, config, api_key.as_deref(), aggregation_method, min_sources_num) {
+        let source_prices = batched.get(&token).map(Vec::as_slice).unwrap_or_default();
+        match aggregate_and_store_price(&token, source_prices, aggregation_method, min_sources_num) {
             Ok(stored) => {
                 results.push(PriceResult {
                     token: token.clone(),
@@ -380,6 +411,34 @@ fn report_prices_to_contract(contract_id: &str, key_name: &str, args: &str) -> R
     .map_err(|e| e.to_string())
 }
 
+/// Number of cache misses from which get_prices refetches in one batch.
+///
+/// A batch costs one request per source no matter how many tokens are in it, so it pays off
+/// from the second miss on. For a single miss the per-token path issues the same number of
+/// requests without downloading the 129-536 KB all-ticker responses, so it stays cheaper.
+const BATCH_FETCH_THRESHOLD: usize = 2;
+
+/// How a token's cache entry resolved, before any fetch
+enum CacheState {
+    /// Fresh cached price, or a terminal error (unknown token, storage failure) — no fetch
+    Resolved(PriceResult),
+    /// Needs a fresh price; `fallback` is what to return if that fetch fails
+    Miss {
+        token: String,
+        fallback: CacheFallback,
+    },
+}
+
+/// What get_prices falls back to when the refetch of a cache miss fails
+enum CacheFallback {
+    /// Nothing was cached
+    Empty,
+    /// Stale but readable — served with a warning rather than dropped
+    Stale(StoredPrice),
+    /// The cached entry could not be parsed; carries the parse error
+    Corrupt(String),
+}
+
 /// Handle get_prices command (blockchain requests)
 /// Returns cached prices if fresh, otherwise fetches new ones
 fn handle_get_prices(
@@ -388,7 +447,6 @@ fn handle_get_prices(
     aggregation_method: AggregationMethod,
     min_sources_num: u8,
 ) -> CommandResponse {
-    let mut results = Vec::new();
     let now = current_timestamp();
 
     // Load exchange configs from public storage
@@ -406,6 +464,352 @@ fn handle_get_prices(
     // Get universal API key for potential fresh fetches
     let api_key = env::var("API_KEY").ok();
 
+    // Pass 1: resolve every token against the cache, collecting the ones that need a fetch
+    let mut states: Vec<CacheState> = Vec::with_capacity(tokens.len());
+    for token_ref in tokens {
+        let token = token_ref.to_string();
+        if !configs.contains_key(&token) {
+            states.push(CacheState::Resolved(PriceResult {
+                token,
+                price: None,
+                timestamp: None,
+                sources: None,
+                from_cache: None,
+                error: Some("Token not in exchange config".to_string()),
+            }));
+            continue;
+        }
+
+        // Try to read from public storage
+        let key = StoredPrice::storage_key(&token);
+        match storage::get_worker(&key) {
+            Ok(Some(data)) => match serde_json::from_slice::<StoredPrice>(&data) {
+                Ok(stored) if stored.is_fresh(now, max_age_secs) => {
+                    // Return cached price
+                    states.push(CacheState::Resolved(PriceResult {
+                        token,
+                        price: Some(stored.price),
+                        timestamp: Some(stored.timestamp),
+                        sources: Some(stored.sources.iter().map(|s| s.name.clone()).collect()),
+                        from_cache: Some(true),
+                        error: None,
+                    }));
+                }
+                // Cached price is stale, fetch fresh
+                Ok(stored) => states.push(CacheState::Miss {
+                    token,
+                    fallback: CacheFallback::Stale(stored),
+                }),
+                // Corrupted cache, fetch fresh
+                Err(e) => states.push(CacheState::Miss {
+                    token,
+                    fallback: CacheFallback::Corrupt(e.to_string()),
+                }),
+            },
+            // No cached price, fetch fresh
+            Ok(None) => states.push(CacheState::Miss {
+                token,
+                fallback: CacheFallback::Empty,
+            }),
+            Err(e) => states.push(CacheState::Resolved(PriceResult {
+                token,
+                price: None,
+                timestamp: None,
+                sources: None,
+                from_cache: None,
+                error: Some(format!("Storage error: {}", e)),
+            })),
+        }
+    }
+
+    // Pass 2: refetch the misses, batched once several of them need the same sources
+    let misses: Vec<&str> = states
+        .iter()
+        .filter_map(|state| match state {
+            CacheState::Miss { token, .. } => Some(token.as_str()),
+            CacheState::Resolved(_) => None,
+        })
+        .collect();
+
+    let batched = if misses.len() >= BATCH_FETCH_THRESHOLD {
+        Some(shared_sources::fetch_all_sources_batch(
+            &configs_for(misses.into_iter(), &configs),
+            api_key.as_deref(),
+        ))
+    } else {
+        None
+    };
+
+    let mut results = Vec::with_capacity(states.len());
+    for state in states {
+        let (token, fallback) = match state {
+            CacheState::Resolved(result) => {
+                results.push(result);
+                continue;
+            }
+            CacheState::Miss { token, fallback } => (token, fallback),
+        };
+
+        let fetched = match &batched {
+            Some(batched) => {
+                let source_prices = batched.get(&token).map(Vec::as_slice).unwrap_or_default();
+                aggregate_and_store_price(&token, source_prices, aggregation_method, min_sources_num)
+            }
+            // Pass 1 already established that the token is configured
+            None => match configs.get(&token) {
+                Some(config) => fetch_and_store_price(
+                    &token,
+                    config,
+                    api_key.as_deref(),
+                    aggregation_method,
+                    min_sources_num,
+                ),
+                None => Err("Token not in exchange config".to_string()),
+            },
+        };
+
+        match fetched {
+            Ok(new_stored) => results.push(PriceResult {
+                token,
+                price: Some(new_stored.price),
+                timestamp: Some(new_stored.timestamp),
+                sources: Some(new_stored.sources.iter().map(|s| s.name.clone()).collect()),
+                from_cache: Some(false),
+                error: None,
+            }),
+            Err(e) => results.push(match fallback {
+                CacheFallback::Empty => PriceResult {
+                    token,
+                    price: None,
+                    timestamp: None,
+                    sources: None,
+                    from_cache: None,
+                    error: Some(format!("No cache and fetch failed: {}", e)),
+                },
+                // Return stale price with warning
+                CacheFallback::Stale(stored) => PriceResult {
+                    token,
+                    price: Some(stored.price),
+                    timestamp: Some(stored.timestamp),
+                    sources: Some(stored.sources.iter().map(|s| s.name.clone()).collect()),
+                    from_cache: Some(true),
+                    error: Some(format!("Using stale cache, fetch failed: {}", e)),
+                },
+                CacheFallback::Corrupt(parse_error) => PriceResult {
+                    token,
+                    price: None,
+                    timestamp: None,
+                    sources: None,
+                    from_cache: None,
+                    error: Some(format!(
+                        "Cache parse error: {}, fetch error: {}",
+                        parse_error, e
+                    )),
+                },
+            }),
+        }
+    }
+
+    let success = results.iter().all(|r| r.price.is_some());
+    CommandResponse {
+        success,
+        prices: results,
+        error: None,
+    }
+}
+
+/// Build a failed get_signed_prices response
+fn signed_prices_error(sig_format: &str, error: String) -> SignedPricesResponse {
+    SignedPricesResponse {
+        success: false,
+        payload: None,
+        signature: None,
+        public_key: None,
+        sig_format: sig_format.to_string(),
+        error: Some(error),
+    }
+}
+
+/// Handle get_signed_prices command - signed pull feed for external consumers
+///
+/// Prices come from the same cache-or-fetch path as get_prices, then get scaled to i64,
+/// keyed by the client's own names and signed in-enclave. The caller receives the exact
+/// bytes we signed, so it can verify off-chain now and on-chain later without
+/// re-serializing anything.
+#[allow(clippy::too_many_arguments)]
+fn handle_get_signed_prices(
+    tokens: &[String],
+    max_age_secs: u64,
+    key_name: &str,
+    aliases: Option<&HashMap<String, String>>,
+    sig_format: Option<&str>,
+    expo: Option<i32>,
+    exclude_sources: Option<&[String]>,
+    aggregation_method: AggregationMethod,
+    min_sources_num: u8,
+) -> SignedPricesResponse {
+    // Resolve the payload format first — errors echo whatever the caller asked for
+    let format = match signed_prices::SigFormat::parse(sig_format) {
+        Ok(f) => f,
+        Err(e) => return signed_prices_error(sig_format.unwrap_or("json"), e),
+    };
+    let format_str = format.as_str();
+
+    // Only TEE-held keys may sign the feed (same rule as get_public_key)
+    if !key_name.starts_with("PROTECTED_") {
+        return signed_prices_error(format_str, "key_name must start with PROTECTED_".to_string());
+    }
+
+    if tokens.is_empty() {
+        return signed_prices_error(format_str, "tokens must not be empty".to_string());
+    }
+
+    let expo = expo.unwrap_or(signed_prices::DEFAULT_EXPO);
+    if let Err(e) = signed_prices::validate_expo(expo) {
+        return signed_prices_error(format_str, e);
+    }
+
+    // Validate the exclusion list before spending any HTTP call: a typo like "Pyht" must
+    // not silently leave the source contributing to a price the caller thinks is clean
+    let exclude = match signed_prices::validate_exclusions(exclude_sources.unwrap_or(&[])) {
+        Ok(e) => e,
+        Err(e) => return signed_prices_error(format_str, e),
+    };
+
+    // Resolve the signing key up front so a misconfigured key fails before any fetch
+    let private_key = match env::var(key_name) {
+        Ok(k) => k,
+        Err(_) => {
+            return signed_prices_error(
+                format_str,
+                format!("{} not found in environment", key_name),
+            )
+        }
+    };
+    let public_key = match near_tx::derive_implicit_account(&private_key) {
+        Ok((_, public_key)) => public_key,
+        Err(e) => {
+            return signed_prices_error(format_str, format!("Key derivation failed: {}", e))
+        }
+    };
+
+    // Without exclusions this is exactly get_prices (cache-or-fetch + cache write);
+    // with exclusions the cache cannot be served as-is, see collect_prices_excluding_sources
+    let results = if exclude.is_empty() {
+        let response = handle_get_prices(tokens, max_age_secs, aggregation_method, min_sources_num);
+        if response.prices.is_empty() {
+            return signed_prices_error(
+                format_str,
+                response
+                    .error
+                    .unwrap_or_else(|| "No prices returned".to_string()),
+            );
+        }
+        response.prices
+    } else {
+        match collect_prices_excluding_sources(
+            tokens,
+            max_age_secs,
+            aggregation_method,
+            min_sources_num,
+            &exclude,
+        ) {
+            Ok(r) => r,
+            Err(e) => return signed_prices_error(format_str, e),
+        }
+    };
+
+    // A partial signed payload would be dangerous for a lending protocol: fail the whole
+    // request when an asset has no price, or is older than the caller asked for
+    let now = current_timestamp();
+    let mut priced: Vec<(String, f64, u64)> = Vec::with_capacity(results.len());
+    let mut failed: Vec<String> = Vec::new();
+
+    for result in &results {
+        match (result.price, result.timestamp) {
+            (Some(price), Some(timestamp)) if now.saturating_sub(timestamp) <= max_age_secs => {
+                priced.push((result.token.clone(), price, timestamp));
+            }
+            (Some(_), Some(timestamp)) => failed.push(format!(
+                "{}: price is {}s old, older than max_age_secs={}{}",
+                result.token,
+                now.saturating_sub(timestamp),
+                max_age_secs,
+                result
+                    .error
+                    .as_ref()
+                    .map(|e| format!(" ({})", e))
+                    .unwrap_or_default()
+            )),
+            _ => failed.push(format!(
+                "{}: {}",
+                result.token,
+                result
+                    .error
+                    .clone()
+                    .unwrap_or_else(|| "no price available".to_string())
+            )),
+        }
+    }
+
+    if !failed.is_empty() {
+        return signed_prices_error(
+            format_str,
+            format!("Refusing to sign a partial feed: {}", failed.join("; ")),
+        );
+    }
+
+    let entries = match signed_prices::build_entries(&priced, aliases, expo) {
+        Ok(e) => e,
+        Err(e) => return signed_prices_error(format_str, e),
+    };
+
+    let (payload, message) = match signed_prices::encode_payload(&entries, format) {
+        Ok(p) => p,
+        Err(e) => return signed_prices_error(format_str, e),
+    };
+
+    let signature = match near_tx::sign_message(&private_key, &message) {
+        Ok(s) => s,
+        Err(e) => return signed_prices_error(format_str, format!("Signing failed: {}", e)),
+    };
+
+    SignedPricesResponse {
+        success: true,
+        payload: Some(payload),
+        signature: Some(signed_prices::encode_signature(&signature)),
+        public_key: Some(public_key),
+        sig_format: format_str.to_string(),
+        error: None,
+    }
+}
+
+/// Collect prices for a request that excludes some sources
+///
+/// The cached "price:{token}" entry is aggregated over ALL configured sources, so it must
+/// not be served as-is here. StoredPrice.sources keeps the per-source breakdown captured at
+/// StoredPrice.timestamp, so while that entry is fresh we re-aggregate the breakdown over
+/// the allowed sources only — publish_time then stays the real moment the TEE observed
+/// exactly those sources. When the cache is stale (or too few allowed sources remain in it)
+/// we fetch fresh with the excluded sources stripped out of the ExchangeConfig.
+///
+/// Filtered results are deliberately NOT written back to "price:{token}": that key is the
+/// canonical all-source price used by get_prices/update_prices and by the on-chain report,
+/// and overwriting it with a subset aggregate would silently degrade every other consumer.
+/// For the same reason this path sends no Telegram alerts — it is a per-caller view, not
+/// the canonical feed; failures are returned to the caller instead.
+fn collect_prices_excluding_sources(
+    tokens: &[String],
+    max_age_secs: u64,
+    aggregation_method: AggregationMethod,
+    min_sources_num: u8,
+    exclude: &[String],
+) -> Result<Vec<PriceResult>, String> {
+    let configs = load_exchange_configs()?;
+    let api_key = env::var("API_KEY").ok();
+    let now = current_timestamp();
+    let mut results = Vec::new();
+
     for token_ref in tokens {
         let token = token_ref.to_string();
         let config = match configs.get(&token) {
@@ -422,111 +826,11 @@ fn handle_get_prices(
                 continue;
             }
         };
-        let key = StoredPrice::storage_key(&token);
 
-        // Try to read from public storage
-        match storage::get_worker(&key) {
-            Ok(Some(data)) => {
-                match serde_json::from_slice::<StoredPrice>(&data) {
-                    Ok(stored) => {
-                        if stored.is_fresh(now, max_age_secs) {
-                            // Return cached price
-                            results.push(PriceResult {
-                                token,
-                                price: Some(stored.price),
-                                timestamp: Some(stored.timestamp),
-                                sources: Some(stored.sources.iter().map(|s| s.name.clone()).collect()),
-                                from_cache: Some(true),
-                                error: None,
-                            });
-                        } else {
-                            // Cached price is stale, fetch fresh
-                            match fetch_and_store_price(&token, config, api_key.as_deref(), aggregation_method, min_sources_num) {
-                                Ok(new_stored) => {
-                                    results.push(PriceResult {
-                                        token,
-                                        price: Some(new_stored.price),
-                                        timestamp: Some(new_stored.timestamp),
-                                        sources: Some(
-                                            new_stored.sources.iter().map(|s| s.name.clone()).collect(),
-                                        ),
-                                        from_cache: Some(false),
-                                        error: None,
-                                    });
-                                }
-                                Err(e) => {
-                                    // Return stale price with warning
-                                    results.push(PriceResult {
-                                        token,
-                                        price: Some(stored.price),
-                                        timestamp: Some(stored.timestamp),
-                                        sources: Some(
-                                            stored.sources.iter().map(|s| s.name.clone()).collect(),
-                                        ),
-                                        from_cache: Some(true),
-                                        error: Some(format!("Using stale cache, fetch failed: {}", e)),
-                                    });
-                                }
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        // Corrupted cache, fetch fresh
-                        match fetch_and_store_price(&token, config, api_key.as_deref(), aggregation_method, min_sources_num) {
-                            Ok(new_stored) => {
-                                results.push(PriceResult {
-                                    token,
-                                    price: Some(new_stored.price),
-                                    timestamp: Some(new_stored.timestamp),
-                                    sources: Some(
-                                        new_stored.sources.iter().map(|s| s.name.clone()).collect(),
-                                    ),
-                                    from_cache: Some(false),
-                                    error: None,
-                                });
-                            }
-                            Err(fetch_err) => {
-                                results.push(PriceResult {
-                                    token,
-                                    price: None,
-                                    timestamp: None,
-                                    sources: None,
-                                    from_cache: None,
-                                    error: Some(format!(
-                                        "Cache parse error: {}, fetch error: {}",
-                                        e, fetch_err
-                                    )),
-                                });
-                            }
-                        }
-                    }
-                }
-            }
-            Ok(None) => {
-                // No cached price, fetch fresh
-                match fetch_and_store_price(&token, config, api_key.as_deref(), aggregation_method, min_sources_num) {
-                    Ok(new_stored) => {
-                        results.push(PriceResult {
-                            token,
-                            price: Some(new_stored.price),
-                            timestamp: Some(new_stored.timestamp),
-                            sources: Some(new_stored.sources.iter().map(|s| s.name.clone()).collect()),
-                            from_cache: Some(false),
-                            error: None,
-                        });
-                    }
-                    Err(e) => {
-                        results.push(PriceResult {
-                            token,
-                            price: None,
-                            timestamp: None,
-                            sources: None,
-                            from_cache: None,
-                            error: Some(format!("No cache and fetch failed: {}", e)),
-                        });
-                    }
-                }
-            }
+        // Re-aggregate the cached per-source breakdown while it is still fresh
+        let cached = match storage::get_worker(&StoredPrice::storage_key(&token)) {
+            Ok(Some(data)) => serde_json::from_slice::<StoredPrice>(&data).ok(),
+            Ok(None) => None,
             Err(e) => {
                 results.push(PriceResult {
                     token,
@@ -536,16 +840,96 @@ fn handle_get_prices(
                     from_cache: None,
                     error: Some(format!("Storage error: {}", e)),
                 });
+                continue;
+            }
+        };
+
+        if let Some(stored) = cached {
+            if stored.is_fresh(now, max_age_secs) {
+                let kept: Vec<&SourceInfo> = stored
+                    .sources
+                    .iter()
+                    .filter(|s| !signed_prices::is_excluded(&s.name, exclude))
+                    .collect();
+
+                if !kept.is_empty() && kept.len() >= min_sources_num as usize {
+                    let mut prices: Vec<f64> = kept.iter().map(|s| s.price).collect();
+                    results.push(PriceResult {
+                        token,
+                        price: Some(signed_prices::aggregate(&mut prices, aggregation_method)),
+                        timestamp: Some(stored.timestamp),
+                        sources: Some(kept.iter().map(|s| s.name.clone()).collect()),
+                        from_cache: Some(true),
+                        error: None,
+                    });
+                    continue;
+                }
             }
         }
+
+        // Fetch fresh from the allowed sources only
+        let filtered = signed_prices::filter_exchange_config(config, exclude);
+        if signed_prices::configured_sources(&filtered).is_empty() {
+            results.push(PriceResult {
+                token,
+                price: None,
+                timestamp: None,
+                sources: None,
+                from_cache: None,
+                error: Some(format!(
+                    "every configured source is excluded (excluded: {})",
+                    exclude.join(", ")
+                )),
+            });
+            continue;
+        }
+
+        let source_prices = shared_sources::fetch_all_sources(&filtered, api_key.as_deref());
+
+        if source_prices.is_empty() {
+            results.push(PriceResult {
+                token,
+                price: None,
+                timestamp: None,
+                sources: None,
+                from_cache: None,
+                error: Some(format!(
+                    "No sources available (excluded: {})",
+                    exclude.join(", ")
+                )),
+            });
+            continue;
+        }
+
+        if source_prices.len() < min_sources_num as usize {
+            results.push(PriceResult {
+                token,
+                price: None,
+                timestamp: None,
+                sources: None,
+                from_cache: None,
+                error: Some(format!(
+                    "Not enough sources: got {}, required {} (excluded: {})",
+                    source_prices.len(),
+                    min_sources_num,
+                    exclude.join(", ")
+                )),
+            });
+            continue;
+        }
+
+        let mut prices: Vec<f64> = source_prices.iter().map(|p| p.price).collect();
+        results.push(PriceResult {
+            token,
+            price: Some(signed_prices::aggregate(&mut prices, aggregation_method)),
+            timestamp: Some(current_timestamp()),
+            sources: Some(source_prices.iter().map(|p| p.source_name.clone()).collect()),
+            from_cache: Some(false),
+            error: None,
+        });
     }
 
-    let success = results.iter().all(|r| r.price.is_some());
-    CommandResponse {
-        success,
-        prices: results,
-        error: None,
-    }
+    Ok(results)
 }
 
 /// Handle force_update command - anyone can call if they pay
@@ -572,24 +956,28 @@ fn handle_force_update(
     // Get universal API key from environment
     let api_key = env::var("API_KEY").ok();
 
+    // Same batched fetch as update_prices — force_update only differs in ignoring the cache
+    let batched = shared_sources::fetch_all_sources_batch(
+        &configs_for(tokens.iter().map(String::as_str), &configs),
+        api_key.as_deref(),
+    );
+
     for token_ref in tokens {
         let token = token_ref.to_string();
-        let config = match configs.get(&token) {
-            Some(c) => c,
-            None => {
-                results.push(PriceResult {
-                    token,
-                    price: None,
-                    timestamp: None,
-                    sources: None,
-                    from_cache: None,
-                    error: Some("Token not in exchange config".to_string()),
-                });
-                continue;
-            }
-        };
+        if !configs.contains_key(&token) {
+            results.push(PriceResult {
+                token,
+                price: None,
+                timestamp: None,
+                sources: None,
+                from_cache: None,
+                error: Some("Token not in exchange config".to_string()),
+            });
+            continue;
+        }
 
-        match fetch_and_store_price(&token, config, api_key.as_deref(), aggregation_method, min_sources_num) {
+        let source_prices = batched.get(&token).map(Vec::as_slice).unwrap_or_default();
+        match aggregate_and_store_price(&token, source_prices, aggregation_method, min_sources_num) {
             Ok(stored) => {
                 results.push(PriceResult {
                     token,
@@ -693,6 +1081,32 @@ fn fetch_and_store_price(
     // Use shared crate's fetch_all_sources with exchange config
     let source_prices = shared_sources::fetch_all_sources(config, api_key);
 
+    aggregate_and_store_price(token, &source_prices, aggregation_method, min_sources_num)
+}
+
+/// Collect the exchange configs of the requested tokens, for one batched fetch.
+/// Tokens missing from the config are skipped here and reported per token by the caller.
+fn configs_for<'a, I>(tokens: I, configs: &HashMap<String, ExchangeConfig>) -> HashMap<String, ExchangeConfig>
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    tokens
+        .into_iter()
+        .filter_map(|token| configs.get(token).map(|config| (token.to_string(), config.clone())))
+        .collect()
+}
+
+/// Aggregate one token's per-source prices, alert on anomalies and write the cache entry.
+///
+/// Split out of `fetch_and_store_price` so the batched path reuses the exact same minimum
+/// source count, deviation alerting, aggregation and storage behaviour — only the fetch
+/// differs between the two.
+fn aggregate_and_store_price(
+    token: &str,
+    source_prices: &[SourcePrice],
+    aggregation_method: AggregationMethod,
+    min_sources_num: u8,
+) -> Result<StoredPrice, String> {
     if source_prices.is_empty() {
         // Alert: no sources returned price
         telegram::send_alert(

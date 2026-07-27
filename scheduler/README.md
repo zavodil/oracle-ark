@@ -36,6 +36,10 @@ Crypto.com─┘                     │             │  trigger      │ WASI 
 
 3. **Triggering an update**: the scheduler sends a `call` request to the OutLayer coordinator with command `update_prices` and the list of tokens to refresh. **The scheduler does NOT send price data** — it only tells the TEE worker *which* tokens need updating. The worker then fetches prices from all configured sources independently inside the enclave, aggregates them, and writes the result to public storage.
 
+   The refresh is split into **groups that run concurrently** (`GROUP_MAX_TOKENS`, `FETCH_CONCURRENCY`). The worker queries its sources sequentially, so a single call carrying every token is the slow path; grouping keeps a cycle short. Each group writes its own tokens as it finishes, so one failing group never discards the others' work — the failure is alerted and the healthy groups still commit.
+
+4. **Pushing on-chain** (optional) runs as a **separate, much slower phase** — see below.
+
 ### Why this design?
 
 - **Trust model preserved** — the scheduler never provides data that needs to be trusted; all price fetching and aggregation happens inside TEE
@@ -58,6 +62,15 @@ Either trigger is sufficient. If a price moves fast, it gets updated before the 
 Set `UPDATE_CONTRACT_ENABLED=true` to have the TEE worker also call `report_prices` on the oracle smart contract after updating public storage. This writes prices on-chain, making them available via contract view methods without an OutLayer call.
 
 Each on-chain update costs gas, so this mode is **disabled by default**. Enable it only when on-chain price availability is required.
+
+Note this scheduler is a convenience, not a dependency: the on-chain push is permissionless, so
+anyone can call the worker with `update_prices` + `update_contract: true` and write fresh prices to
+the contract even while this scheduler is stopped. They cannot influence the price — the worker
+aggregates sources inside the enclave and signs with a TEE-held key that the contract's
+`push_signer_accounts` allowlist checks. Repeated triggers are bounded by a 20-second per-asset
+skip, and gas always comes from the push signer's funded account.
+
+The push is deliberately **decoupled from the cache refresh**: it runs on its own interval (`CONTRACT_PUSH_INTERVAL_SECS`, default 300s) as a **single call covering all tokens**, never once per refresh group. That means raising the refresh rate — or `FETCH_CONCURRENCY` — makes prices fresher without multiplying transactions or gas. The balance fail-safe still applies: if a signer's balance cannot be confirmed above `ORACLE_MIN_BALANCE_NEAR`, pushes pause and the scheduler keeps running warm-only. A failed push is alerted and retried on the next push cycle; it never fails the refresh cycle.
 
 Setting `UPDATE_CONTRACT_ENABLED=true` also **requires** `ORACLE_CONTRACT_ID` plus `SECRETS_PROFILE` and `SECRETS_ACCOUNT_ID`. Without these, the WASI binary runs without the `PROTECTED_` signing keys and no on-chain push happens (public storage is still updated).
 
@@ -124,8 +137,11 @@ cargo run --release
 | `POLL_INTERVAL_SECS` | `5` | How often the poll loop runs (seconds) |
 | `PRIORITY_ASSETS` | `wrap.near,nbtc.bridge.near,aurora` | Comma-separated assets refreshed on the priority interval |
 | `PRICE_DIFF_THRESHOLD_PERCENT` | `1.0` | Price change % that triggers immediate refresh |
+| `GROUP_MAX_TOKENS` | `4` | Max tokens per WASI cache-refresh call |
+| `FETCH_CONCURRENCY` | `3` | How many refresh groups run concurrently |
 | `NEAR_RPC_URL` | `https://rpc.mainnet.fastnear.com` | NEAR RPC endpoint |
 | `UPDATE_CONTRACT_ENABLED` | `false` | Also push prices to on-chain contract (costs gas) |
+| `CONTRACT_PUSH_INTERVAL_SECS` | `300` | How often the on-chain push runs (seconds) |
 | `ORACLE_CONTRACT_ID` | — | Contract to update (required if above is true) |
 | `ORACLE_SIGNER_ACCOUNT` | — | Account used to sign on-chain oracle updates |
 | `ORACLE_MIN_BALANCE_NEAR` | `0.05` | Minimum signer balance before alerting (NEAR) |

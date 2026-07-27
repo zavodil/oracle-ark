@@ -111,6 +111,42 @@ pub async fn fetch_all_sources(
         }
     }
 
+    if let Some(ref pair) = config.kraken {
+        if let Ok(p) = fetch_kraken(client, pair).await {
+            prices.push(p);
+        }
+    }
+
+    if let Some(ref product_id) = config.coinbase {
+        if let Ok(p) = fetch_coinbase(client, product_id).await {
+            prices.push(p);
+        }
+    }
+
+    if let Some(ref pair) = config.bitstamp {
+        if let Ok(p) = fetch_bitstamp(client, pair).await {
+            prices.push(p);
+        }
+    }
+
+    if let Some(ref inst_id) = config.okx {
+        if let Ok(p) = fetch_okx(client, inst_id).await {
+            prices.push(p);
+        }
+    }
+
+    if let Some(ref symbol) = config.bitget {
+        if let Ok(p) = fetch_bitget(client, symbol).await {
+            prices.push(p);
+        }
+    }
+
+    if let Some(ref symbol) = config.mexc {
+        if let Ok(p) = fetch_mexc(client, symbol).await {
+            prices.push(p);
+        }
+    }
+
     prices
 }
 
@@ -283,6 +319,114 @@ async fn fetch_cryptocom(client: &reqwest::Client, instrument: &str) -> Result<S
 
     Ok(SourcePrice {
         source_name: "cryptocom".to_string(),
+        price,
+        timestamp: current_timestamp(),
+    })
+}
+
+async fn fetch_kraken(client: &reqwest::Client, pair: &str) -> Result<SourcePrice> {
+    let url = parsers::kraken_url(pair);
+    let response = client.get(&url).send().await?;
+
+    if !response.status().is_success() {
+        anyhow::bail!("HTTP {}", response.status());
+    }
+
+    let json: serde_json::Value = response.json().await?;
+    let price = parsers::parse_kraken(&json)?;
+
+    Ok(SourcePrice {
+        source_name: "kraken".to_string(),
+        price,
+        timestamp: current_timestamp(),
+    })
+}
+
+async fn fetch_coinbase(client: &reqwest::Client, product_id: &str) -> Result<SourcePrice> {
+    let url = parsers::coinbase_url(product_id);
+    let response = client.get(&url).send().await?;
+
+    if !response.status().is_success() {
+        anyhow::bail!("HTTP {}", response.status());
+    }
+
+    let json: serde_json::Value = response.json().await?;
+    let price = parsers::parse_coinbase(&json)?;
+
+    Ok(SourcePrice {
+        source_name: "coinbase".to_string(),
+        price,
+        timestamp: current_timestamp(),
+    })
+}
+
+async fn fetch_bitstamp(client: &reqwest::Client, pair: &str) -> Result<SourcePrice> {
+    let url = parsers::bitstamp_url(pair);
+    let response = client.get(&url).send().await?;
+
+    if !response.status().is_success() {
+        anyhow::bail!("HTTP {}", response.status());
+    }
+
+    let json: serde_json::Value = response.json().await?;
+    let price = parsers::parse_bitstamp(&json)?;
+
+    Ok(SourcePrice {
+        source_name: "bitstamp".to_string(),
+        price,
+        timestamp: current_timestamp(),
+    })
+}
+
+async fn fetch_okx(client: &reqwest::Client, inst_id: &str) -> Result<SourcePrice> {
+    let url = parsers::okx_url(inst_id);
+    let response = client.get(&url).send().await?;
+
+    if !response.status().is_success() {
+        anyhow::bail!("HTTP {}", response.status());
+    }
+
+    let json: serde_json::Value = response.json().await?;
+    let price = parsers::parse_okx(&json)?;
+
+    Ok(SourcePrice {
+        source_name: "okx".to_string(),
+        price,
+        timestamp: current_timestamp(),
+    })
+}
+
+async fn fetch_bitget(client: &reqwest::Client, symbol: &str) -> Result<SourcePrice> {
+    let url = parsers::bitget_url(symbol);
+    let response = client.get(&url).send().await?;
+
+    if !response.status().is_success() {
+        anyhow::bail!("HTTP {}", response.status());
+    }
+
+    let json: serde_json::Value = response.json().await?;
+    let price = parsers::parse_bitget(&json)?;
+
+    Ok(SourcePrice {
+        source_name: "bitget".to_string(),
+        price,
+        timestamp: current_timestamp(),
+    })
+}
+
+async fn fetch_mexc(client: &reqwest::Client, symbol: &str) -> Result<SourcePrice> {
+    let url = parsers::mexc_url(symbol);
+    let response = client.get(&url).send().await?;
+
+    if !response.status().is_success() {
+        anyhow::bail!("HTTP {}", response.status());
+    }
+
+    let json: serde_json::Value = response.json().await?;
+    let price = parsers::parse_mexc(&json)?;
+
+    Ok(SourcePrice {
+        source_name: "mexc".to_string(),
         price,
         timestamp: current_timestamp(),
     })

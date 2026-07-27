@@ -9,6 +9,11 @@ use std::error::Error;
 use std::time::Duration;
 use wasi_http_client::Client;
 
+/// Connect timeout for custom-source requests. See the note in `oracle-ark-sources`: the client
+/// offers no read/total timeout, so this only bounds the connect phase; a stalled-after-connect
+/// server is bounded by the WASI call's `max_execution_seconds`.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+
 /// Fetch price from custom user-defined source (returns f64)
 pub fn fetch_custom(config: &CustomSourceConfig) -> Result<f64, Box<dyn Error>> {
     let value = fetch_custom_raw(config)?;
@@ -93,7 +98,7 @@ fn fetch_custom_raw(config: &CustomSourceConfig) -> Result<serde_json::Value, Bo
     }
 
     // Send request
-    let response = request.connect_timeout(Duration::from_secs(10)).send()?;
+    let response = request.connect_timeout(CONNECT_TIMEOUT).send()?;
 
     // Check status
     let status = response.status();

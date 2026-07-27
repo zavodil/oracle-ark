@@ -254,6 +254,31 @@ Result: No human holds the signing key. Only verified TEE code can push prices.`
                 <li>Fund the derived implicit account with NEAR</li>
                 <li>Scheduler pushes prices autonomously from TEE</li>
               </ol>
+
+              <h3 className="text-lg font-semibold text-white mb-4">Anyone Can Push Prices On-Chain</h3>
+              <p className="text-dark-300 mb-4">
+                The on-chain update is permissionless. Anyone can call the worker with{' '}
+                <code className="text-primary">update_prices</code> and{' '}
+                <code className="text-primary">update_contract: true</code> and have fresh prices written to
+                the oracle contract — paying only for the WASI execution, and working even when our scheduler
+                is down. The feed does not depend on a single operator staying online.
+              </p>
+              <div className="card mb-4">
+                <p className="text-dark-400 text-sm mb-3">
+                  <strong className="text-white">A caller cannot influence the price.</strong> The worker fetches
+                  and aggregates the sources itself inside the enclave, and the resulting{' '}
+                  <code className="text-primary">report_prices</code> transaction is signed by a TEE-generated key
+                  whose private half never leaves the enclave. The contract accepts a report only from the{' '}
+                  <code className="text-primary">push_signer_accounts</code> registered for that asset, so a
+                  caller-supplied price is rejected by construction.
+                </p>
+                <p className="text-dark-400 text-sm">
+                  <strong className="text-white">Two limits bound the cost.</strong> An asset reported to the
+                  contract less than <strong>20 seconds</strong> ago is skipped, so repeated triggers cannot spam
+                  transactions. And gas comes from the push signer&apos;s implicit account: an empty balance simply
+                  means no on-chain push, while prices in public storage keep updating either way.
+                </p>
+              </div>
             </section>
 
             {/* Data Freshness & Attestation */}

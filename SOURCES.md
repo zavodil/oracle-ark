@@ -4,7 +4,8 @@ This document lists the price sources the oracle actually supports, and the exac
 configuration format used to attach them to an asset.
 
 > Source dispatch lives in [`sources/src/sources.rs`](sources/src/sources.rs)
-> (`fetch_all_sources`); the config type is `ExchangeConfig` in
+> (`fetch_all_sources` for a single asset, `fetch_all_sources_batch` for a whole set —
+> one request per source instead of one per asset); the config type is `ExchangeConfig` in
 > [`sources/src/lib.rs`](sources/src/lib.rs). Adding a key that no source reads is
 > silently ignored (unknown fields are dropped on parse), so keep this list in sync
 > with the code.
@@ -29,6 +30,12 @@ governance action.
   "gate": "near_usdt",
   "pyth": "0xc415de8d2eba7db216527dff4b60e8f3a5311c740dadb233e13e12547e226750",
   "chainlink": "0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419",
+  "kraken": "NEARUSD",
+  "coinbase": "NEAR-USD",
+  "bitstamp": "NEAR/USD",
+  "okx": "NEAR-USDT",
+  "bitget": "NEARUSDT",
+  "mexc": "NEARUSDT",
   "stablecoin": false
 }
 ```
@@ -49,22 +56,58 @@ governance action.
 | `kucoin` | KuCoin | dash symbol | `"NEAR-USDT"` |
 | `gate` | Gate.io | lowercase underscore pair | `"near_usdt"` |
 | `cryptocom` | Crypto.com | underscore instrument | `"NEAR_USDT"` |
+| `kraken` | Kraken | **canonical** pair name | `"NEARUSD"`, `"XXBTZUSD"` |
+| `coinbase` | Coinbase Exchange | product id (fiat USD) | `"NEAR-USD"` |
+| `bitstamp` | Bitstamp | slashed pair (fiat USD) | `"NEAR/USD"` |
+| `okx` | OKX | dash instrument id | `"NEAR-USDT"` |
+| `bitget` | Bitget | plain symbol | `"NEARUSDT"` |
+| `mexc` | MEXC | plain symbol (USDT only) | `"NEARUSDT"` |
+
+Quote currency matters: `kraken`, `coinbase` and `bitstamp` quote **real fiat USD**, so they
+price a stablecoin independently of USDT. `okx`, `bitget` and `mexc` are USDT-quoted (except
+`okx`'s `USDT-USD`), so their reading carries whatever USDT is worth at the time.
 
 Notes:
 - **CoinGecko** accepts an optional API key via the `API_KEY` secret (sent as
   `x_cg_pro_api_key`); all other exchanges are keyless.
-- **Chainlink** reads `latestAnswer()` over Ethereum RPC with automatic multi-RPC
-  failover; if every RPC fails, Chainlink is skipped for that run and an alert is sent.
-- **Binance** may return HTTP 451 in geo-blocked regions — pair it with `binance_us`
-  and other exchanges so a single blocked source never fails aggregation.
+- **Chainlink** reads Ethereum RPC with automatic multi-RPC failover; if every RPC fails,
+  Chainlink is skipped for that run and an alert is sent. A single asset is read with
+  `latestAnswer()`; a set of assets is read in one `eth_call` through Multicall3
+  (`aggregate3` with `allowFailure = true`, `latestRoundData()` per feed), so a delisted
+  feed is reported on its own instead of taking the other feeds down with it.
+- **Binance** requests go to `data-api.binance.vision`, which serves the same public
+  market-data API as `api.binance.com` — the latter answers HTTP 451 from geo-blocked
+  regions, including our worker egress.
+- **Kraken** uses legacy asset codes, so the pair is often not what you would guess:
+  `XXBTZUSD`, `XETHZUSD`, `XXRPZUSD`, `XDGUSD` (Dogecoin), `XXLMZUSD`, `XLTCZUSD`,
+  `XZECZUSD`, while newer listings are plain (`NEARUSD`, `SOLUSD`, `USDCUSD`, `WBTCUSD`).
+  Store the **canonical** name: Kraken answers under it whatever alias you request, and the
+  batch parser only falls back to alias matching when the canonical name does not match.
+  Kraken also drops the *entire* batch (HTTP 200, `error: ["EQuery:Unknown asset pair"]`)
+  when one pair is unknown, so a bad entry triggers a per-pair retry rather than losing
+  Kraken for every asset.
+- **Coinbase** has no batch form of `/ticker`, so a set of assets is read from
+  `/products/stats`. That endpoint is cached ~5s against the ticker's ~1s and therefore
+  trails it slightly (measured: 3.68 bps median divergence, 8.60 bps max) — well inside the
+  freshness SLA. `/products` also lists delisted markets whose `/ticker` answers HTTP 400;
+  those are absent from `/products/stats`, and a missing or zero stat is treated as a
+  missing source, never as a price.
+- **Bitget** carries its price in `lastPr`, not `last`.
+- **MEXC**'s `ticker/price` endpoint quotes USDT pairs only and reports no timestamp.
+- **FRAX is deliberately configured without any exchange source.** After Frax's April-2025
+  rebrand the ticker `FRAX` on exchanges is the *governance* token (~$0.27, verified live on
+  MEXC), while the asset the oracle prices (`0x853d955a…`) is the *stablecoin* (~$0.99).
+  Attaching a CEX `FRAX` symbol would feed a ~73%-wrong price into a lending oracle, so FRAX
+  stays address-based (`chainlink` / `coingecko`) only.
 
 ## Source-side freshness
 
 Only **Pyth** exposes an upstream data timestamp that the oracle checks: prices whose
 `publish_time` is older than 120 seconds are rejected
 ([`sources/src/sources.rs`](sources/src/sources.rs), `fetch_pyth`). Every other
-endpoint above returns only a value with no data timestamp, so its reading is stamped
-with the fetch time and is only as fresh as the moment it was read. See
+endpoint above is stamped with the fetch time and is only as fresh as the moment it was
+read — including `bitstamp`, `okx` and `bitget`, whose batch endpoints *do* report an
+upstream time that the parsers carry but the aggregator does not act on. See
 [the platform freshness docs](https://outlayer.fastnear.com/docs/tee-attestation#data-freshness)
 for how consumers should reason about age.
 

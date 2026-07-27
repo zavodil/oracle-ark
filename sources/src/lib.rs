@@ -56,6 +56,27 @@ pub struct ExchangeConfig {
     pub gate: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cryptocom: Option<String>,
+    /// Kraken pair in its CANONICAL spelling (`XXBTZUSD`, `XETHZUSD`, `NEARUSD`).
+    /// Kraken answers with the canonical name whatever alias you ask for, so storing the
+    /// canonical form here is what makes the batch lookup an exact match.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kraken: Option<String>,
+    /// Coinbase Exchange product id (`NEAR-USD`) — quoted in real fiat USD
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub coinbase: Option<String>,
+    /// Bitstamp pair WITH the slash (`BTC/USD`), as the all-ticker endpoint reports it.
+    /// The single-pair URL form (`btcusd`) is derived from this, not stored separately.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bitstamp: Option<String>,
+    /// OKX instrument id (`NEAR-USDT`)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub okx: Option<String>,
+    /// Bitget symbol (`NEARUSDT`)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bitget: Option<String>,
+    /// MEXC symbol (`NEARUSDT`) — this endpoint quotes USDT pairs only
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mexc: Option<String>,
     #[serde(default)]
     pub stablecoin: bool,
     /// Token decimals (used by UI, not by price fetching)

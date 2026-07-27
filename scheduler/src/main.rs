@@ -12,6 +12,7 @@ mod telegram;
 use anyhow::{Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use futures::future::join_all;
+use futures::stream::{self, StreamExt};
 use oracle_ark_sources::ExchangeConfig;
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -51,6 +52,17 @@ struct Config {
 
     /// Price difference threshold percentage (price-based trigger)
     price_diff_threshold_percent: f64,
+
+    /// Max tokens per WASI cache-refresh call. WASI fetches sources sequentially, so a big batch
+    /// is slow; splitting it into groups that run concurrently is what keeps the cycle short.
+    group_max_tokens: usize,
+
+    /// How many cache-refresh groups may be in flight at once.
+    fetch_concurrency: usize,
+
+    /// How often the contract push runs (seconds). Deliberately decoupled from the cache-refresh
+    /// cadence: refreshing is cheap and frequent, pushing costs gas and must stay rare.
+    contract_push_interval_secs: u64,
 
     /// Whether to also update the contract via WASI
     update_contract_enabled: bool,
@@ -123,6 +135,18 @@ impl Config {
                 .unwrap_or_else(|_| "1.0".to_string())
                 .parse()
                 .unwrap_or(1.0),
+            group_max_tokens: env::var("GROUP_MAX_TOKENS")
+                .unwrap_or_else(|_| "4".to_string())
+                .parse()
+                .unwrap_or(4),
+            fetch_concurrency: env::var("FETCH_CONCURRENCY")
+                .unwrap_or_else(|_| "3".to_string())
+                .parse()
+                .unwrap_or(3),
+            contract_push_interval_secs: env::var("CONTRACT_PUSH_INTERVAL_SECS")
+                .unwrap_or_else(|_| "300".to_string())
+                .parse()
+                .unwrap_or(300),
             update_contract_enabled: env::var("UPDATE_CONTRACT_ENABLED")
                 .unwrap_or_else(|_| "false".to_string())
                 .parse()
@@ -231,6 +255,9 @@ async fn main() -> Result<()> {
     // Global batch timers (full update vs priority-only)
     let mut last_priority_update: Option<Instant> = None;
     let mut last_full_update: Option<Instant> = None;
+    // Separate, much slower timer for the on-chain push — it costs gas, so it must not follow the
+    // cache-refresh cadence.
+    let mut last_contract_push: Option<Instant> = None;
 
     // Cached exchange configs from public storage, refreshed every hour
     let mut exchange_configs_cache: Option<HashMap<String, ExchangeConfig>> = None;
@@ -279,6 +306,12 @@ async fn main() -> Result<()> {
                             cfg.kucoin.as_ref().map(|_| "kucoin"),
                             cfg.gate.as_ref().map(|_| "gate"),
                             cfg.cryptocom.as_ref().map(|_| "cryptocom"),
+                            cfg.kraken.as_ref().map(|_| "kraken"),
+                            cfg.coinbase.as_ref().map(|_| "coinbase"),
+                            cfg.bitstamp.as_ref().map(|_| "bitstamp"),
+                            cfg.okx.as_ref().map(|_| "okx"),
+                            cfg.bitget.as_ref().map(|_| "bitget"),
+                            cfg.mexc.as_ref().map(|_| "mexc"),
                         ]
                         .into_iter()
                         .flatten()
@@ -403,7 +436,7 @@ async fn main() -> Result<()> {
             }
         }
 
-        let wasi_was_called = match poll_and_update(&client, &config, &mut last_priority_update, &mut last_full_update, oracle_keys_cache.as_ref(), contract_update_paused, exchange_configs, &mut alert_throttle).await {
+        let wasi_was_called = match poll_and_update(&client, &config, &mut last_priority_update, &mut last_full_update, &mut last_contract_push, oracle_keys_cache.as_ref(), contract_update_paused, exchange_configs, &mut alert_throttle).await {
             Ok(called) => {
                 consecutive_failures = 0;
                 called
@@ -652,11 +685,103 @@ async fn fetch_exchange_configs(
 }
 
 
+/// Rough cost of querying one source, in milliseconds, measured from the production worker host.
+/// Used only to balance groups against each other — relative order matters, absolute values do not.
+fn source_cost_ms(source: &str) -> u32 {
+    match source {
+        "gate" => 570,      // by far the slowest configured source (TLS handshake alone ~0.42s)
+        "binance_alpha" => 200,
+        "cryptocom" => 200,
+        "kucoin" => 185,
+        "huobi" => 180,
+        "chainlink" => 150, // varies by RPC, and may retry across several on failure
+        "binance_us" => 130,
+        "pyth" => 105,
+        "coingecko" => 50,
+        "binance" => 50,    // geo-blocked from our egress: fails fast, contributes no price
+        // The six below were timed from a developer host rather than the worker, so treat
+        // them as relative weights only — which is all this function is used for.
+        "mexc" => 565,
+        "bitget" => 390,
+        "okx" => 315,
+        "bitstamp" => 310,
+        "coinbase" => 130,
+        "kraken" => 120,
+        _ => 150,
+    }
+}
+
+/// Estimated fetch cost of a token = the sum of the sources its config enables.
+fn token_fetch_cost_ms(cfg: &ExchangeConfig) -> u32 {
+    let mut cost = 0;
+    if cfg.coingecko.is_some() { cost += source_cost_ms("coingecko"); }
+    if cfg.binance.is_some() { cost += source_cost_ms("binance"); }
+    if cfg.binance_us.is_some() { cost += source_cost_ms("binance_us"); }
+    if cfg.binance_alpha.is_some() { cost += source_cost_ms("binance_alpha"); }
+    if cfg.pyth.is_some() { cost += source_cost_ms("pyth"); }
+    if cfg.chainlink.is_some() { cost += source_cost_ms("chainlink"); }
+    if cfg.huobi.is_some() { cost += source_cost_ms("huobi"); }
+    if cfg.kucoin.is_some() { cost += source_cost_ms("kucoin"); }
+    if cfg.gate.is_some() { cost += source_cost_ms("gate"); }
+    if cfg.cryptocom.is_some() { cost += source_cost_ms("cryptocom"); }
+    if cfg.kraken.is_some() { cost += source_cost_ms("kraken"); }
+    if cfg.coinbase.is_some() { cost += source_cost_ms("coinbase"); }
+    if cfg.bitstamp.is_some() { cost += source_cost_ms("bitstamp"); }
+    if cfg.okx.is_some() { cost += source_cost_ms("okx"); }
+    if cfg.bitget.is_some() { cost += source_cost_ms("bitget"); }
+    if cfg.mexc.is_some() { cost += source_cost_ms("mexc"); }
+    cost
+}
+
+/// Split tokens into groups of roughly equal fetch cost, capped at `group_size` tokens each.
+///
+/// Chunking by count alone produces badly skewed groups, because tokens differ enormously in how
+/// much work they carry: an asset with six exchanges costs several times one priced from a single
+/// feed. Since a cycle is only as fast as its slowest group, that skew is exactly what we pay for.
+/// This is greedy longest-processing-time-first bin packing: heaviest token first, always into the
+/// currently lightest group that still has room. Deterministic and stateless — no latency history
+/// to keep, because a slow source is slow for every token that uses it.
+fn balance_groups(
+    tokens: &[String],
+    configs: &HashMap<String, ExchangeConfig>,
+    group_size: usize,
+) -> Vec<Vec<String>> {
+    if tokens.is_empty() {
+        return Vec::new();
+    }
+    let group_size = group_size.max(1);
+    let group_count = tokens.len().div_ceil(group_size);
+
+    let mut items: Vec<(&String, u32)> = tokens
+        .iter()
+        .map(|t| {
+            let cost = configs.get(t).map(token_fetch_cost_ms).unwrap_or(150);
+            (t, cost)
+        })
+        .collect();
+    // Heaviest first; tie-break on the id so the layout is stable across cycles.
+    items.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+
+    let mut groups: Vec<Vec<String>> = vec![Vec::new(); group_count];
+    let mut loads: Vec<u32> = vec![0; group_count];
+    for (token, cost) in items {
+        let target = (0..group_count)
+            .filter(|&i| groups[i].len() < group_size)
+            .min_by_key(|&i| loads[i])
+            .unwrap_or(0);
+        groups[target].push(token.clone());
+        loads[target] += cost;
+    }
+    groups.retain(|g| !g.is_empty());
+    groups
+}
+
 async fn poll_and_update(
     client: &reqwest::Client,
     config: &Config,
     last_priority_update: &mut Option<Instant>,
     last_full_update: &mut Option<Instant>,
+    last_contract_push: &mut Option<Instant>,
     oracle_keys: Option<&HashMap<String, String>>,
     contract_update_paused: bool,
     exchange_configs: &HashMap<String, ExchangeConfig>,
@@ -761,42 +886,139 @@ async fn poll_and_update(
         }
     }
 
-    // 4. Trigger WASI update if needed
+    // 4. Phase 1 — refresh the price cache. WASI fetches its sources sequentially, so one call
+    // carrying every token is the slow path; splitting it into groups that run concurrently is
+    // what keeps a cycle short. Each group writes its own tokens to storage as it completes, so a
+    // failing group never discards the work of the others. Never pushes on-chain (see phase 2).
+    let mut cache_refreshed = false;
     if !tokens_to_update.is_empty() {
         let batch_type = if full_due { "full" } else if priority_due { "priority" } else { "price-triggered" };
-        info!("Triggering WASI update: {} tokens ({})", tokens_to_update.len(), batch_type);
+        let group_size = config.group_max_tokens.max(1);
+        let concurrency = config.fetch_concurrency.max(1);
+        let groups = balance_groups(&tokens_to_update, exchange_configs, group_size);
+        info!(
+            "Refreshing {} tokens ({}) in {} group(s), {} concurrent",
+            tokens_to_update.len(),
+            batch_type,
+            groups.len(),
+            concurrency
+        );
 
-        match call_wasi_update(client, config, &tokens_to_update, oracle_keys, contract_update_paused).await {
-            Ok(_) => {
-                info!("WASI update successful");
-                let now = Instant::now();
-                if full_due {
-                    *last_full_update = Some(now);
-                    *last_priority_update = Some(now);
-                } else if priority_due {
-                    *last_priority_update = Some(now);
-                }
-                return Ok(true);
+        let outcomes: Vec<(Vec<String>, Result<()>)> = stream::iter(groups.into_iter().map(|group| {
+            let client = client.clone();
+            let config = config.clone();
+            async move {
+                let res =
+                    call_wasi_update(&client, &config, &group, None, contract_update_paused, false)
+                        .await;
+                (group, res)
             }
-            Err(e) => {
-                // Send Telegram alert for WASI failures (throttled)
-                alert_throttle.send(
+        }))
+        .buffer_unordered(concurrency)
+        .collect()
+        .await;
+
+        let group_count = outcomes.len();
+        let mut failures: Vec<String> = Vec::new();
+        for (group, res) in &outcomes {
+            match res {
+                Ok(_) => cache_refreshed = true,
+                Err(e) => failures.push(format!("{:?}: {}", group, e)),
+            }
+        }
+
+        if !failures.is_empty() {
+            // Report the broken groups but keep what the healthy ones already committed, rather
+            // than failing the whole cycle over one bad exchange.
+            warn!("{}/{} refresh group(s) failed", failures.len(), group_count);
+            alert_throttle
+                .send(
                     client,
                     config.telegram_bot_token.as_deref(),
                     config.telegram_chat_id.as_deref(),
                     "WASI Update Failed",
                     &format!(
-                        "Project: {}/{}\nTokens: {:?}\nError: {}",
-                        config.project_owner, config.project_name, tokens_to_update, e
+                        "Project: {}/{}\nFailed {}/{} group(s):\n{}",
+                        config.project_owner,
+                        config.project_name,
+                        failures.len(),
+                        group_count,
+                        failures.join("\n")
                     ),
                 )
                 .await;
-                anyhow::bail!("WASI update failed: {}", e);
+        }
+
+        if cache_refreshed {
+            let now = Instant::now();
+            if full_due {
+                *last_full_update = Some(now);
+                *last_priority_update = Some(now);
+            } else if priority_due {
+                *last_priority_update = Some(now);
+            }
+        } else {
+            anyhow::bail!("all {} refresh group(s) failed", group_count);
+        }
+    }
+
+    // 5. Phase 2 — push prices on-chain. ONE call covering every token, on its own slow cadence.
+    // Kept separate from the refresh above precisely so that parallelising the refresh cannot
+    // multiply transactions: refreshing is cheap and frequent, pushing costs gas and stays rare.
+    let mut pushed = false;
+    if config.update_contract_enabled && !contract_update_paused {
+        let push_due = last_contract_push
+            .map(|t| t.elapsed().as_secs() >= config.contract_push_interval_secs)
+            .unwrap_or(true);
+        if push_due {
+            let push_tokens: Vec<String> = current_prices.keys().cloned().collect();
+            if !push_tokens.is_empty() {
+                info!(
+                    "Contract push due (every {}s): {} tokens",
+                    config.contract_push_interval_secs,
+                    push_tokens.len()
+                );
+                match call_wasi_update(
+                    client,
+                    config,
+                    &push_tokens,
+                    oracle_keys,
+                    contract_update_paused,
+                    true,
+                )
+                .await
+                {
+                    Ok(_) => {
+                        info!("Contract push successful");
+                        *last_contract_push = Some(Instant::now());
+                        pushed = true;
+                    }
+                    Err(e) => {
+                        // A failed push must not fail the cycle — the cache is already fresh and
+                        // the next push cycle retries.
+                        warn!("Contract push failed: {}", e);
+                        alert_throttle
+                            .send(
+                                client,
+                                config.telegram_bot_token.as_deref(),
+                                config.telegram_chat_id.as_deref(),
+                                "Contract Push Failed",
+                                &format!(
+                                    "Project: {}/{}\nTokens: {}\nError: {}",
+                                    config.project_owner,
+                                    config.project_name,
+                                    push_tokens.len(),
+                                    e
+                                ),
+                            )
+                            .await;
+                    }
+                }
             }
         }
     }
 
-    Ok(false) // nothing to update
+    Ok(cache_refreshed || pushed)
 }
 
 async fn read_public_storage_batch(
@@ -863,14 +1085,19 @@ async fn call_wasi_update(
     tokens: &[String],
     oracle_keys: Option<&HashMap<String, String>>,
     contract_update_paused: bool,
+    push_to_contract: bool,
 ) -> Result<()> {
     let url = format!(
         "{}/call/{}/{}",
         config.coordinator_url, config.project_owner, config.project_name
     );
 
-    // When balance is low, run warm-only (fetch + cache, no contract push)
-    let effective_update_contract = config.update_contract_enabled && !contract_update_paused;
+    // Contract push happens ONLY on the dedicated push cycle (`push_to_contract`), never on a
+    // cache-refresh group — otherwise splitting a refresh into N parallel groups would fire N
+    // on-chain transactions instead of one, multiplying gas. Balance fail-safe still applies:
+    // when it is low we run warm-only (fetch + cache, no push).
+    let effective_update_contract =
+        push_to_contract && config.update_contract_enabled && !contract_update_paused;
 
     // Build WASI input - NOTE: we do NOT pass prices!
     // WASI will fetch its own prices from sources inside TEE
@@ -890,7 +1117,13 @@ async fn call_wasi_update(
         }
     }
 
-    let max_execution_secs: u64 = 180;
+    // The WASI HTTP client has no read timeout (only connect), so a source that accepts the
+    // connection and then stalls can only be bounded from here. A refresh group is small
+    // (GROUP_MAX_TOKENS x ~6 sources, ~5-15s in practice), so a tight limit cuts a hung group
+    // loose quickly — and because groups run concurrently, the others are unaffected. The
+    // contract push keeps the wider limit: it covers every token and also signs and sends
+    // transactions.
+    let max_execution_secs: u64 = if push_to_contract { 180 } else { 60 };
 
     let mut body = serde_json::json!({
         "input": input,
@@ -995,5 +1228,87 @@ async fn call_wasi_update(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cfg(sources: &[&str]) -> ExchangeConfig {
+        let mut c = ExchangeConfig::default();
+        for s in sources {
+            match *s {
+                "coingecko" => c.coingecko = Some("x".into()),
+                "binance_us" => c.binance_us = Some("x".into()),
+                "pyth" => c.pyth = Some("x".into()),
+                "huobi" => c.huobi = Some("x".into()),
+                "kucoin" => c.kucoin = Some("x".into()),
+                "gate" => c.gate = Some("x".into()),
+                "cryptocom" => c.cryptocom = Some("x".into()),
+                other => panic!("unhandled source in test: {}", other),
+            }
+        }
+        c
+    }
+
+    /// A token with six exchanges costs several times one priced from a single feed, so grouping
+    /// by count alone leaves one group carrying most of the work.
+    #[test]
+    fn groups_are_balanced_by_cost_not_by_count() {
+        let heavy = ["a", "b", "c", "d"]; // 6 sources each
+        let light = ["e", "f", "g", "h"]; // 1 source each
+        let mut configs = HashMap::new();
+        for t in heavy {
+            configs.insert(
+                t.to_string(),
+                cfg(&["binance_us", "huobi", "cryptocom", "kucoin", "gate", "pyth"]),
+            );
+        }
+        for t in light {
+            configs.insert(t.to_string(), cfg(&["pyth"]));
+        }
+        let tokens: Vec<String> = heavy.iter().chain(light.iter()).map(|s| s.to_string()).collect();
+
+        let groups = balance_groups(&tokens, &configs, 4);
+        assert_eq!(groups.len(), 2, "8 tokens / 4 per group");
+        assert!(groups.iter().all(|g| g.len() <= 4), "group size cap holds");
+
+        let loads: Vec<u32> = groups
+            .iter()
+            .map(|g| g.iter().map(|t| token_fetch_cost_ms(&configs[t])).sum())
+            .collect();
+        let (min, max) = (loads.iter().min().unwrap(), loads.iter().max().unwrap());
+        // Naive chunking would put all four heavy tokens in one group: a ~6x imbalance.
+        assert!(*max as f64 <= *min as f64 * 1.5, "loads roughly even: {:?}", loads);
+
+        let total: usize = groups.iter().map(|g| g.len()).sum();
+        assert_eq!(total, 8, "every token is scheduled exactly once");
+    }
+
+    #[test]
+    fn every_token_is_assigned_and_layout_is_stable() {
+        let mut configs = HashMap::new();
+        for t in ["a", "b", "c", "d", "e"] {
+            configs.insert(t.to_string(), cfg(&["pyth", "gate"]));
+        }
+        let tokens: Vec<String> = ["a", "b", "c", "d", "e"].iter().map(|s| s.to_string()).collect();
+
+        let first = balance_groups(&tokens, &configs, 2);
+        let second = balance_groups(&tokens, &configs, 2);
+        assert_eq!(first, second, "grouping is deterministic across cycles");
+
+        let mut seen: Vec<String> = first.iter().flatten().cloned().collect();
+        seen.sort();
+        assert_eq!(seen, tokens);
+    }
+
+    /// A token missing from the config map must still be scheduled, not silently dropped.
+    #[test]
+    fn unknown_tokens_still_get_scheduled() {
+        let configs: HashMap<String, ExchangeConfig> = HashMap::new();
+        let tokens = vec!["ghost".to_string()];
+        let groups = balance_groups(&tokens, &configs, 4);
+        assert_eq!(groups, vec![vec!["ghost".to_string()]]);
     }
 }

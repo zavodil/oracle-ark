@@ -85,6 +85,40 @@ pub enum OracleCommand {
         min_sources_num: u8,
     },
 
+    /// Get prices signed in-enclave with an Ed25519 key (pull model, no gas on our side)
+    /// Consumers verify the signature over the exact bytes of the returned payload,
+    /// off-chain today and on-chain later. Freshness follows get_prices semantics.
+    GetSignedPrices {
+        /// Asset ids to price — every one must resolve, otherwise the request fails
+        tokens: Vec<String>,
+        /// Maximum age of cached price in seconds (default: 120)
+        #[serde(default = "default_max_age")]
+        max_age_secs: u64,
+        /// PROTECTED_ environment variable holding the in-enclave Ed25519 signing key
+        key_name: String,
+        /// Optional rename map: our asset_id -> client key
+        /// E.g., {"aurora": "eth.bridge.near"} publishes our aurora feed as eth.bridge.near
+        /// Assets not in this map keep our asset_id as the key
+        #[serde(default)]
+        aliases: Option<std::collections::HashMap<String, String>>,
+        /// Payload format: "json" (default) or "borsh"
+        #[serde(default)]
+        sig_format: Option<String>,
+        /// Price exponent: real price = price * 10^expo (default: -8)
+        #[serde(default)]
+        expo: Option<i32>,
+        /// Sources to exclude from this request (e.g. ["pyth"] for a Pyth-independent leg)
+        /// Names must match SourcePrice.source_name; unknown names are rejected
+        #[serde(default)]
+        exclude_sources: Option<Vec<String>>,
+        /// How to aggregate prices from multiple sources (default: median)
+        #[serde(default = "default_aggregation")]
+        aggregation_method: AggregationMethod,
+        /// Minimum number of sources required (default: 1)
+        #[serde(default = "default_min_sources")]
+        min_sources_num: u8,
+    },
+
     /// Force update prices - anyone can call if they pay for execution
     /// Always fetches fresh prices from sources, ignoring cache
     ForceUpdate {
@@ -288,6 +322,28 @@ pub struct SyncResponse {
     pub success: bool,
     pub count: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Response for get_signed_prices command
+///
+/// The signature covers the exact bytes of `payload`:
+/// - sig_format "json": the UTF-8 bytes of the `payload` string
+/// - sig_format "borsh": the raw bytes of `base64_decode(payload)`
+///
+/// Verifiers MUST NOT re-serialize the payload before checking the signature.
+/// All fields are always present (null when unset) so the envelope is stable for clients.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SignedPricesResponse {
+    pub success: bool,
+    /// Signed payload: JSON object string, or base64 borsh blob when sig_format="borsh"
+    pub payload: Option<String>,
+    /// Base64 of the 64-byte Ed25519 signature
+    pub signature: Option<String>,
+    /// Signer public key in NEAR format (ed25519:base58...)
+    pub public_key: Option<String>,
+    /// Payload format actually used ("json" or "borsh")
+    pub sig_format: String,
     pub error: Option<String>,
 }
 

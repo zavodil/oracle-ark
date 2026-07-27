@@ -91,12 +91,21 @@ fn extract_hostname(url: &str) -> Result<String, String> {
         return Err("Invalid URL format".to_string());
     };
 
-    // Find end of hostname (port or path)
-    let hostname_end = after_protocol
-        .find(|c| c == ':' || c == '/' || c == '?' || c == '#')
-        .unwrap_or(after_protocol.len());
-
-    let hostname = &after_protocol[..hostname_end];
+    // IPv6 literals are bracketed (`http://[::1]:8080/x`). They must be unwrapped first: the
+    // generic scan below would stop at the first ':' inside the address and yield "[", which
+    // then fails to parse as an IpAddr and slips past the loopback/private guards entirely.
+    let hostname = if let Some(rest) = after_protocol.strip_prefix('[') {
+        match rest.find(']') {
+            Some(end) => &rest[..end],
+            None => return Err("Malformed IPv6 URL: missing ']'".to_string()),
+        }
+    } else {
+        // Find end of hostname (port or path)
+        let hostname_end = after_protocol
+            .find(|c| c == ':' || c == '/' || c == '?' || c == '#')
+            .unwrap_or(after_protocol.len());
+        &after_protocol[..hostname_end]
+    };
 
     if hostname.is_empty() {
         return Err("Empty hostname".to_string());

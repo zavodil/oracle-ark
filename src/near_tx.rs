@@ -81,30 +81,42 @@ enum Signature {
 // Public API
 // ============================================================================
 
+/// Parse a NEAR ed25519 private key into a signing key
+///
+/// Accepts "ed25519:<base58>" or bare base58, and both the 32-byte seed and the
+/// 64-byte NEAR JSON format (seed || public key)
+pub fn parse_signing_key(private_key: &str) -> Result<SigningKey, Box<dyn std::error::Error>> {
+    let key_str = private_key.strip_prefix("ed25519:").unwrap_or(private_key);
+
+    let key_bytes = bs58::decode(key_str)
+        .into_vec()
+        .map_err(|e| format!("Failed to decode private key: {}", e))?;
+
+    if key_bytes.len() != 32 && key_bytes.len() != 64 {
+        return Err(format!("Invalid private key length: {}", key_bytes.len()).into());
+    }
+
+    let mut seed = [0u8; 32];
+    seed.copy_from_slice(&key_bytes[..32]);
+    Ok(SigningKey::from_bytes(&seed))
+}
+
 /// Derive implicit account ID and public key from a private key
 /// Returns (implicit_account_id, ed25519:base58_pubkey)
 ///
 /// NEAR implicit account = hex-encoded ed25519 public key (64 chars)
 pub fn derive_implicit_account(private_key: &str) -> Result<(String, String), Box<dyn std::error::Error>> {
-    let key_str = if private_key.starts_with("ed25519:") {
-        &private_key[8..]
-    } else {
-        private_key
-    };
-    let key_bytes = bs58::decode(key_str)
-        .into_vec()
-        .map_err(|e| format!("Failed to decode private key: {}", e))?;
-    if key_bytes.len() != 32 && key_bytes.len() != 64 {
-        return Err(format!("Invalid private key length: {}", key_bytes.len()).into());
-    }
-    let mut seed = [0u8; 32];
-    seed.copy_from_slice(&key_bytes[..32]);
-    let signing_key = SigningKey::from_bytes(&seed);
-    let verifying_key = signing_key.verifying_key();
+    let verifying_key = parse_signing_key(private_key)?.verifying_key();
 
     let implicit_account_id = hex::encode(verifying_key.to_bytes());
     let public_key = format!("ed25519:{}", bs58::encode(verifying_key.to_bytes()).into_string());
     Ok((implicit_account_id, public_key))
+}
+
+/// Sign an arbitrary message with a NEAR ed25519 private key
+/// Returns the raw 64-byte signature (no hashing — the message is signed as-is)
+pub fn sign_message(private_key: &str, message: &[u8]) -> Result<[u8; 64], Box<dyn std::error::Error>> {
+    Ok(parse_signing_key(private_key)?.sign(message).to_bytes())
 }
 
 /// Send a function call transaction, returns transaction hash
@@ -146,26 +158,8 @@ fn send_function_call_transaction(
     gas: u64,
     deposit: u128,
 ) -> Result<String, Box<dyn std::error::Error>> {
-    // Parse private key (remove "ed25519:" prefix if present)
-    let key_str = if signer_private_key.starts_with("ed25519:") {
-        &signer_private_key[8..]
-    } else {
-        signer_private_key
-    };
-
-    let key_bytes = bs58::decode(key_str)
-        .into_vec()
-        .map_err(|e| format!("Failed to decode private key: {}", e))?;
-
-    // NEAR private keys in JSON format are 64 bytes (32-byte seed + 32-byte public key)
-    // Extract only the first 32 bytes as the seed
-    if key_bytes.len() != 32 && key_bytes.len() != 64 {
-        return Err(format!("Invalid private key length: {}", key_bytes.len()).into());
-    }
-
-    let mut seed = [0u8; 32];
-    seed.copy_from_slice(&key_bytes[..32]);
-    let signing_key = SigningKey::from_bytes(&seed);
+    // Parse private key (handles "ed25519:" prefix and both 32/64-byte key formats)
+    let signing_key = parse_signing_key(signer_private_key)?;
     let verifying_key = signing_key.verifying_key();
 
     // Get nonce and block hash from RPC

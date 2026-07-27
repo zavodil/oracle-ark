@@ -26,6 +26,22 @@ TEE-Secured Price Oracle delivers cryptocurrency prices with **instant response 
 
    Anyone can run their own scheduler or trigger updates manually.
 
+   **This extends to the on-chain push.** Anyone can call the WASI worker with
+   `update_prices` + `update_contract: true` and have fresh prices written to the oracle
+   contract — no permission needed, and it works even if our scheduler is down. The caller
+   pays only for the WASI execution; they cannot influence the price, because the worker
+   fetches and aggregates the sources itself inside the enclave, and the resulting
+   `report_prices` transaction is signed by a TEE-generated key whose private half never
+   leaves the enclave. The contract accepts a report only from the `push_signer_accounts`
+   registered for that asset, so a caller-supplied price is impossible by construction.
+
+   Two things bound the cost of that openness: the worker skips any asset reported to the
+   contract less than **20 seconds** ago (so repeated triggers cannot spam transactions),
+   and gas comes from the push signer's implicit account, which is funded deliberately —
+   an empty balance simply means no on-chain push, while public-storage prices keep
+   updating. The result is liveness without a trusted operator: the feed does not stop
+   because one scheduler stopped.
+
 4. **On-Demand Fallback** — If cached prices are stale, the WASI worker fetches fresh data first, then returns it. You always get a price.
 
 > **Note:** The scheduler runs on **mainnet** only. On testnet, prices are fetched on-demand to save TEE resources. Anyone can run their own scheduler for testnet using the `scheduler/` directory.

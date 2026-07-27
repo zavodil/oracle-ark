@@ -1,6 +1,20 @@
 /target
-Cargo.lock
 *.wasm
 .DS_Store
 oracle-prices-ui/.next
 oracle-prices-ui/out
+*.tsbuildinfo
+
+# Lock files ARE committed here, overriding any global ignore.
+#
+# The scheduler image builds with `cargo build --locked`, so an untracked lock file means the
+# build depends on whatever stale copy happens to sit on the host — which is exactly how a
+# dependency change turns into "the lock file needs to be updated but --locked was passed" on
+# a machine that never sees the fix.
+#
+# The worker's lock matters for a different reason: its wasm hash is what the enclave attests.
+# An unpinned dependency graph means the same source can compile to a different binary, and a
+# measurement nobody can reproduce is not much of a measurement.
+!Cargo.lock
+!scheduler/Cargo.lock
+!sources/Cargo.lock

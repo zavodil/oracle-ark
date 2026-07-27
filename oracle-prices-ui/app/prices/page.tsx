@@ -101,6 +101,7 @@ function PriceCard({
   tokensConfig: TokensConfig;
 }) {
   const { data, error } = result;
+  const [sourcesOpen, setSourcesOpen] = useState(false);
   const fresh = data && isFresh(data.timestamp);
   const stablecoin = isStablecoin(assetId, tokensConfig);
   const sourceCount = getSourceCount(assetId, tokensConfig);
@@ -183,13 +184,25 @@ function PriceCard({
         </div>
       </div>
 
-      {/* Sources — collapsed by default, the breakdown is detail most visitors do not want */}
+      {/* Sources — collapsed by default, the breakdown is detail most visitors do not want.
+          Deliberately React state rather than <details>: the page re-fetches every 30s, and the
+          browser's own disclosure state is not something React owns, so an expanded card would
+          be at the mercy of reconciliation. This also keeps each card strictly independent. */}
       {data && data.sources && data.sources.length > 0 && (
-        <details className="mt-4 pt-4 border-t border-dark-700 group">
-          <summary className="flex justify-between items-baseline cursor-pointer list-none select-none">
+        <div className="mt-4 pt-4 border-t border-dark-700">
+          <button
+            type="button"
+            onClick={() => setSourcesOpen((open) => !open)}
+            aria-expanded={sourcesOpen}
+            className="w-full flex justify-between items-baseline cursor-pointer select-none group text-left"
+          >
             <span className="text-xs text-dark-500 uppercase group-hover:text-dark-400">
               Price Sources
-              <span className="ml-1 inline-block transition-transform group-open:rotate-90">›</span>
+              <span
+                className={`ml-1 inline-block transition-transform ${sourcesOpen ? 'rotate-90' : ''}`}
+              >
+                ›
+              </span>
             </span>
             {(() => {
               const range = sourceAgeRange(data.sources);
@@ -203,8 +216,8 @@ function PriceCard({
                 </span>
               );
             })()}
-          </summary>
-          <div className="space-y-1 mt-2">
+          </button>
+          <div className={`space-y-1 mt-2 ${sourcesOpen ? '' : 'hidden'}`}>
             {data.sources.map((source, idx) => (
               <div key={idx} className="flex justify-between items-baseline text-sm gap-2">
                 <span className="text-dark-400 truncate">{source.name}</span>
@@ -224,7 +237,7 @@ function PriceCard({
               </div>
             ))}
           </div>
-        </details>
+        </div>
       )}
 
       {/* Error message */}
@@ -430,7 +443,10 @@ export default function PricesPage() {
             ))}
           </div>
         ) : (
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+          // items-start: without it grid rows stretch every card to the tallest one, so
+          // expanding a single card's sources resizes its whole row and reads as if the
+          // others had opened too
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 items-start">
             {allTokens.map(assetId => (
               <PriceCard
                 key={assetId}

@@ -113,9 +113,3 @@ code {
 .badge-info {
   @apply bg-blue-500/20 text-blue-400;
 }
-
-/* Collapsible source breakdown: `list-none` alone does not remove the disclosure triangle
-   in WebKit, which would sit next to our own caret */
-summary::-webkit-details-marker {
-  display: none;
-}

@@ -15,7 +15,10 @@ import {
 const API_URL = 'https://api.outlayer.fastnear.com';
 const PROJECT_UUID = 'p0000000000000003';
 const RECENCY_DURATION_SEC = 120; // 2 minutes
-const REFRESH_INTERVAL_SEC = 30;
+
+// Priority assets are refreshed by the scheduler roughly every 16s, so polling slower than that
+// shows a price that already moved. This costs one public-storage read per tab — no worker call.
+const REFRESH_INTERVAL_SEC = 10;
 
 interface PriceSource {
   name: string;
@@ -89,6 +92,120 @@ function sourceAgeRange(sources: PriceSource[] | undefined): { min: number; max:
     .filter((a) => Number.isFinite(a));
   if (ages.length === 0) return null;
   return { min: Math.min(...ages), max: Math.max(...ages) };
+}
+
+// Circumference of the countdown ring (r = 10 in a 24-viewBox), so the dash offset is exact
+// rather than eyeballed
+const RING_CIRCUMFERENCE = 2 * Math.PI * 10;
+
+/**
+ * Refresh control: one component carrying all three jobs — refresh now, show how long until the
+ * next automatic refresh, and turn that automation off.
+ *
+ * Deliberately one control rather than a button plus a floating ring elsewhere on the page: the
+ * countdown used to live in a corner widget nobody looked at, which is why "it refreshes" was
+ * invisible even though it was happening.
+ */
+function RefreshControl({
+  countdown,
+  autoRefresh,
+  refreshing,
+  onRefresh,
+  onToggleAuto,
+}: {
+  countdown: number;
+  autoRefresh: boolean;
+  refreshing: boolean;
+  onRefresh: () => void;
+  onToggleAuto: () => void;
+}) {
+  const progress = autoRefresh ? (REFRESH_INTERVAL_SEC - countdown) / REFRESH_INTERVAL_SEC : 0;
+  // Snap instead of animating when the ring wraps back to full, otherwise every cycle ends with
+  // a one-second rewind
+  const wrapping = countdown >= REFRESH_INTERVAL_SEC;
+
+  return (
+    <div className="flex items-stretch rounded-lg border border-dark-700 bg-dark-800 overflow-hidden">
+      <button
+        type="button"
+        onClick={onRefresh}
+        title="Refresh now"
+        className="flex items-center gap-2.5 pl-2.5 pr-3.5 py-2 hover:bg-dark-700 active:bg-dark-600 transition-colors group"
+      >
+        <span className="relative w-7 h-7 shrink-0">
+          <svg className="w-7 h-7 -rotate-90" viewBox="0 0 24 24" aria-hidden="true">
+            <circle cx="12" cy="12" r="10" strokeWidth="2" className="fill-none stroke-dark-700" />
+            <circle
+              cx="12"
+              cy="12"
+              r="10"
+              strokeWidth="2"
+              strokeLinecap="round"
+              className={`fill-none transition-colors ${
+                refreshing
+                  ? 'stroke-green-400'
+                  : autoRefresh
+                  ? 'stroke-primary group-hover:stroke-green-400'
+                  : 'stroke-dark-600'
+              }`}
+              strokeDasharray={RING_CIRCUMFERENCE}
+              strokeDashoffset={RING_CIRCUMFERENCE * (1 - progress)}
+              style={{ transition: wrapping ? 'none' : 'stroke-dashoffset 1s linear' }}
+            />
+          </svg>
+          <span
+            className={`absolute inset-0 flex items-center justify-center font-mono text-[11px] tabular-nums transition-colors ${
+              refreshing
+                ? 'text-green-400'
+                : autoRefresh
+                ? 'text-dark-300 group-hover:text-green-400'
+                : 'text-dark-500'
+            }`}
+          >
+            {autoRefresh ? (
+              countdown
+            ) : (
+              <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={2}
+                  d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
+                />
+              </svg>
+            )}
+          </span>
+        </span>
+        <span className="text-sm text-dark-200 group-hover:text-white transition-colors">
+          Refresh
+        </span>
+      </button>
+
+      <div className="w-px bg-dark-700" aria-hidden="true" />
+
+      <button
+        type="button"
+        onClick={onToggleAuto}
+        aria-pressed={autoRefresh}
+        title={autoRefresh ? 'Pause auto-refresh' : 'Resume auto-refresh'}
+        className={`px-3 hover:bg-dark-700 active:bg-dark-600 transition-colors ${
+          autoRefresh ? 'text-dark-400 hover:text-white' : 'text-dark-500 hover:text-primary'
+        }`}
+      >
+        {autoRefresh ? (
+          <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+            <rect x="6" y="5" width="4" height="14" rx="1" />
+            <rect x="14" y="5" width="4" height="14" rx="1" />
+          </svg>
+        ) : (
+          <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M8 5.5v13a1 1 0 001.53.848l10-6.5a1 1 0 000-1.696l-10-6.5A1 1 0 008 5.5z" />
+          </svg>
+        )}
+        <span className="sr-only">{autoRefresh ? 'Pause auto-refresh' : 'Resume auto-refresh'}</span>
+      </button>
+    </div>
+  );
 }
 
 function PriceCard({
@@ -254,8 +371,9 @@ export default function PricesPage() {
   const [prices, setPrices] = useState<Record<string, PriceResult>>({});
   const [loading, setLoading] = useState(true);
   const [countdown, setCountdown] = useState(REFRESH_INTERVAL_SEC);
+  const [autoRefresh, setAutoRefresh] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [freshCount, setFreshCount] = useState(0);
-  const countdownRef = useRef<NodeJS.Timeout | null>(null);
   const lastFetchTimeRef = useRef<number>(Date.now());
   const tokensConfigRef = useRef<TokensConfig>({});
   const allTokensRef = useRef<string[]>(DEFAULT_TOKENS);
@@ -263,6 +381,9 @@ export default function PricesPage() {
   const fetchPrices = useCallback(async () => {
     const tokens = allTokensRef.current;
     const keys = tokens.map(assetId => `price:${assetId}`);
+    // Held for a beat below even when the request returns instantly — a refresh nobody can see
+    // happen reads as a refresh that did not happen
+    setRefreshing(true);
 
     try {
       const response = await fetch(`${API_URL}/public/storage/batch`, {
@@ -311,6 +432,7 @@ export default function PricesPage() {
       setFreshCount(0);
     } finally {
       setLoading(false);
+      setTimeout(() => setRefreshing(false), 400);
     }
   }, []);
 
@@ -333,12 +455,21 @@ export default function PricesPage() {
       });
   }, [fetchPrices]);
 
-  // Initial fetch and auto-refresh
+  // First load
   useEffect(() => {
     fetchPrices();
     lastFetchTimeRef.current = Date.now();
+  }, [fetchPrices]);
 
-    countdownRef.current = setInterval(() => {
+  // Auto-refresh loop. Torn down entirely when paused rather than left ticking and ignored, so
+  // "off" means no timer and no requests at all.
+  useEffect(() => {
+    if (!autoRefresh) return;
+
+    lastFetchTimeRef.current = Date.now();
+    setCountdown(REFRESH_INTERVAL_SEC);
+
+    const id = setInterval(() => {
       const elapsed = Math.floor((Date.now() - lastFetchTimeRef.current) / 1000);
       const remaining = REFRESH_INTERVAL_SEC - elapsed;
 
@@ -351,12 +482,8 @@ export default function PricesPage() {
       }
     }, 1000);
 
-    return () => {
-      if (countdownRef.current) {
-        clearInterval(countdownRef.current);
-      }
-    };
-  }, [fetchPrices]);
+    return () => clearInterval(id);
+  }, [autoRefresh, fetchPrices]);
 
   const handleRefresh = () => {
     setCountdown(REFRESH_INTERVAL_SEC);
@@ -364,16 +491,17 @@ export default function PricesPage() {
     fetchPrices();
   };
 
-  const progressPercent = ((REFRESH_INTERVAL_SEC - countdown) / REFRESH_INTERVAL_SEC) * 100;
-
   return (
     <div className="min-h-screen py-8 px-4">
       <div className="max-w-7xl mx-auto">
-        {/* Header */}
-        <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 mb-8">
+        {/* Header — sticky so the countdown and the pause toggle stay reachable while scrolling
+            the grid, which is the whole reason the old corner widget existed.
+            `top-16` clears the site header, which is `fixed h-16` (see components/Header.tsx);
+            at `top-0` this would slide underneath it. */}
+        <div className="sticky top-16 z-20 -mx-4 px-4 py-4 mb-4 bg-dark-950/80 backdrop-blur-sm border-b border-dark-800 flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
           <div>
-            <h1 className="text-3xl font-bold text-white mb-2">Live Prices</h1>
-            <p className="text-dark-400">
+            <h1 className="text-3xl font-bold text-white">Live Prices</h1>
+            <p className="text-dark-400 text-sm mt-1">
               {loading ? 'Loading prices...' : `${freshCount}/${allTokens.length} fresh prices`}
             </p>
           </div>
@@ -382,15 +510,13 @@ export default function PricesPage() {
               <span className="w-2 h-2 bg-green-400 rounded-full animate-pulse"></span>
               <span>Mainnet</span>
             </div>
-            <button
-              onClick={handleRefresh}
-              className="btn btn-secondary flex items-center gap-2"
-            >
-              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-              </svg>
-              Refresh
-            </button>
+            <RefreshControl
+              countdown={countdown}
+              autoRefresh={autoRefresh}
+              refreshing={refreshing}
+              onRefresh={handleRefresh}
+              onToggleAuto={() => setAutoRefresh(v => !v)}
+            />
           </div>
         </div>
 
@@ -407,7 +533,9 @@ export default function PricesPage() {
               >
                 NEAR OutLayer
               </a>{' '}
-              public storage. Scheduler updates every ~60s or on 1% price change. Prices older than 2 min are marked stale.
+              public storage. NEAR, BTC and ETH refresh every ~16s; every other asset every ~60s;
+              Pyth and Chainlink run on their own 90s cycle. A 1% move refreshes early. Prices
+              older than 2 min are marked stale.
             </div>
             <div className="flex items-center gap-4 text-sm">
               <div className="flex items-center gap-2">
@@ -459,36 +587,6 @@ export default function PricesPage() {
         )}
       </div>
 
-      {/* Floating refresh ring */}
-      <div
-        className="fixed bottom-6 right-6 w-16 h-16 cursor-pointer group"
-        onClick={handleRefresh}
-        title="Click to refresh now"
-      >
-        <svg className="w-full h-full -rotate-90" viewBox="0 0 36 36">
-          <circle
-            className="fill-none stroke-dark-700"
-            strokeWidth="3"
-            cx="18"
-            cy="18"
-            r="16"
-          />
-          <circle
-            className="fill-none stroke-primary group-hover:stroke-green-400 transition-colors"
-            strokeWidth="3"
-            strokeLinecap="round"
-            cx="18"
-            cy="18"
-            r="16"
-            strokeDasharray="100.53"
-            strokeDashoffset={100.53 * (1 - progressPercent / 100)}
-            style={{ transition: 'stroke-dashoffset 0.5s linear' }}
-          />
-        </svg>
-        <div className="absolute inset-0 flex items-center justify-center text-sm font-semibold text-dark-400 group-hover:text-green-400 transition-colors">
-          {countdown}s
-        </div>
-      </div>
     </div>
   );
 }

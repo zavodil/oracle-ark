@@ -7,7 +7,7 @@ description = "Shared price sources for oracle-ark (WASI and scheduler)"
 [features]
 default = []
 wasi = ["wasi-http-client"]
-async = ["reqwest"]
+async = ["reqwest", "futures"]
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
@@ -19,3 +19,4 @@ wasi-http-client = { version = "0.2", optional = true }
 
 # Optional: for async (scheduler)
 reqwest = { version = "0.12", features = ["json"], optional = true }
+futures = { version = "0.3", optional = true }

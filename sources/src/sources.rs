@@ -1615,8 +1615,17 @@ pub mod r#async {
     /// Status Binance answers with when a single symbol in a batch is unknown
     const HTTP_BAD_REQUEST: u16 = 400;
 
+    /// Per-venue deadline for a batch request.
+    ///
+    /// The venues are fetched concurrently, so the batch costs the slowest one — which makes an
+    /// unbounded straggler, not the sum, the thing that stretches a poll cycle. The client's own
+    /// timeout covers whole-call worst cases and is far too generous here: an all-ticker endpoint
+    /// that has not answered in 8 seconds is not going to make this cycle useful, and dropping it
+    /// costs one source in one comparison rather than delaying every asset's refresh.
+    const BATCH_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
+
     async fn http_get_text_with_status(client: &reqwest::Client, url: &str) -> Result<(u16, String)> {
-        let response = client.get(url).send().await?;
+        let response = client.get(url).timeout(BATCH_REQUEST_TIMEOUT).send().await?;
         let status = response.status().as_u16();
         Ok((status, response.text().await?))
     }
@@ -1680,6 +1689,7 @@ pub mod r#async {
                     .post(rpc_url)
                     .header("Content-Type", "application/json")
                     .body(body_str.clone())
+                    .timeout(BATCH_REQUEST_TIMEOUT)
                     .send()
                     .await?;
                 if !response.status().is_success() {
@@ -1726,224 +1736,187 @@ pub mod r#async {
         configs: &std::collections::HashMap<String, ExchangeConfig>,
         api_key: Option<&str>,
     ) -> std::collections::HashMap<String, Vec<SourcePrice>> {
+        use futures::future::join_all;
+
         let mut out: std::collections::HashMap<String, Vec<SourcePrice>> = configs
             .keys()
             .map(|token| (token.clone(), Vec::new()))
             .collect();
 
-        let fetched_now = |_: &str, _: &parsers::BatchPrice| Some(current_timestamp());
+        // Index every venue's symbols first, so the requests below borrow nothing that moves
+        let ix_coingecko = index_symbols(configs, |c: &ExchangeConfig| c.coingecko.as_deref());
+        let ix_binance = index_symbols(configs, |c: &ExchangeConfig| c.binance.as_deref());
+        let ix_binance_us = index_symbols(configs, |c: &ExchangeConfig| c.binance_us.as_deref());
+        let ix_binance_alpha =
+            index_symbols(configs, |c: &ExchangeConfig| c.binance_alpha.as_deref());
+        let ix_pyth = index_symbols(configs, |c: &ExchangeConfig| c.pyth_id());
+        let ix_chainlink = index_symbols(configs, |c: &ExchangeConfig| c.chainlink.as_deref());
+        let ix_huobi = index_symbols(configs, |c: &ExchangeConfig| c.huobi.as_deref());
+        let ix_kucoin = index_symbols(configs, |c: &ExchangeConfig| c.kucoin.as_deref());
+        let ix_gate = index_symbols(configs, |c: &ExchangeConfig| c.gate.as_deref());
+        let ix_cryptocom = index_symbols(configs, |c: &ExchangeConfig| c.cryptocom.as_deref());
+        let ix_kraken = index_symbols(configs, |c: &ExchangeConfig| c.kraken.as_deref());
+        let ix_coinbase = index_symbols(configs, |c: &ExchangeConfig| c.coinbase.as_deref());
+        let ix_bitstamp = index_symbols(configs, |c: &ExchangeConfig| c.bitstamp.as_deref());
+        let ix_okx = index_symbols(configs, |c: &ExchangeConfig| c.okx.as_deref());
+        let ix_bitget = index_symbols(configs, |c: &ExchangeConfig| c.bitget.as_deref());
+        let ix_mexc = index_symbols(configs, |c: &ExchangeConfig| c.mexc.as_deref());
 
-        /// One venue whose whole batch is a single GET: index the symbols, run `$body` with
-        /// them in scope, fan the answer back out. A failing venue only logs — it must never
-        /// abort the ones after it.
+        let s_coingecko: Vec<&str> = ix_coingecko.keys().copied().collect();
+        let s_binance: Vec<&str> = ix_binance.keys().copied().collect();
+        let s_binance_us: Vec<&str> = ix_binance_us.keys().copied().collect();
+        let s_binance_alpha: Vec<&str> = ix_binance_alpha.keys().copied().collect();
+        let s_pyth: Vec<&str> = ix_pyth.keys().copied().collect();
+        let s_chainlink: Vec<&str> = ix_chainlink.keys().copied().collect();
+        let s_huobi: Vec<&str> = ix_huobi.keys().copied().collect();
+        let s_kucoin: Vec<&str> = ix_kucoin.keys().copied().collect();
+        let s_gate: Vec<&str> = ix_gate.keys().copied().collect();
+        let s_cryptocom: Vec<&str> = ix_cryptocom.keys().copied().collect();
+        let s_kraken: Vec<&str> = ix_kraken.keys().copied().collect();
+        let s_coinbase: Vec<&str> = ix_coinbase.keys().copied().collect();
+        let s_bitstamp: Vec<&str> = ix_bitstamp.keys().copied().collect();
+        let s_okx: Vec<&str> = ix_okx.keys().copied().collect();
+        let s_bitget: Vec<&str> = ix_bitget.keys().copied().collect();
+        let s_mexc: Vec<&str> = ix_mexc.keys().copied().collect();
+
+        type Job<'f> =
+            std::pin::Pin<Box<dyn std::future::Future<Output = Result<parsers::BatchPrices>> + 'f>>;
+        let mut meta: Vec<(&'static str, &SymbolIndex)> = Vec::new();
+        let mut jobs: Vec<Job> = Vec::new();
+
+        /// Queue one venue. Nothing is awaited here — every venue is issued together below.
+        ///
+        /// Running them one after another is what the WASI worker has to do (no async runtime
+        /// inside the enclave), but doing it here too made the scheduler's poll cycle the sum of
+        /// every venue's latency, and a single hanging endpoint stalled the whole cycle behind
+        /// its 30s timeout. Measured from the production VPS that turned a ~15s cadence into
+        /// 57-78s. Concurrently the cycle costs the SLOWEST venue, not their sum.
         macro_rules! venue {
-            ($field:expr, $name:literal, $symbols:ident => $body:expr) => {{
-                let index = index_symbols(configs, $field);
-                if !index.is_empty() {
-                    let $symbols: Vec<&str> = index.keys().copied().collect();
-                    let result: Result<parsers::BatchPrices> = async { $body }.await;
-                    match result {
-                        Ok(prices) => fan_out(&mut out, &index, &prices, $name, fetched_now),
-                        Err(e) => eprintln!("{} batch failed: {}", $name, e),
-                    }
+            ($ix:expr, $name:literal, $fut:expr) => {
+                if !$ix.is_empty() {
+                    meta.push(($name, &$ix));
+                    jobs.push(Box::pin($fut) as Job);
                 }
-            }};
+            };
         }
 
-        let coingecko = index_symbols(configs, |c: &ExchangeConfig| c.coingecko.as_deref());
-        if !coingecko.is_empty() {
-            let ids: Vec<&str> = coingecko.keys().copied().collect();
-            match http_get_text(client, &parsers::coingecko_batch_url(&ids, api_key)).await {
-                Ok(body) => match parsers::parse_coingecko_batch(&body, &ids) {
-                    Ok(prices) => fan_out(&mut out, &coingecko, &prices, "coingecko", fetched_now),
-                    Err(e) => eprintln!("coingecko batch failed: {}", e),
-                },
-                Err(e) => eprintln!("coingecko batch failed: {}", e),
-            }
-        }
+        venue!(ix_coingecko, "coingecko", async {
+            let body =
+                http_get_text(client, &parsers::coingecko_batch_url(&s_coingecko, api_key)).await?;
+            parsers::parse_coingecko_batch(&body, &s_coingecko)
+        });
 
         // Binance rejects the WHOLE batch when one symbol is unknown; only then pay per symbol
-        let binance = index_symbols(configs, |c: &ExchangeConfig| c.binance.as_deref());
-        if !binance.is_empty() {
-            let symbols: Vec<&str> = binance.keys().copied().collect();
-            let url = parsers::binance_batch_url(&symbols);
-            match http_get_text_with_status(client, &url).await {
-                Ok((status, body)) => {
-                    let parsed = if status == HTTP_BAD_REQUEST {
-                        eprintln!("Binance rejected the batch ({}), retrying per symbol", body.trim());
-                        Ok(fetch_per_symbol(&symbols, |s| fetch_binance(client, s)).await)
-                    } else if !(200..300).contains(&status) {
-                        Err(anyhow::anyhow!("HTTP {}", status))
-                    } else {
-                        parsers::parse_binance_batch(&body, &symbols)
-                    };
-                    match parsed {
-                        Ok(prices) => fan_out(&mut out, &binance, &prices, "binance", fetched_now),
-                        Err(e) => eprintln!("binance batch failed: {}", e),
-                    }
-                }
-                Err(e) => eprintln!("binance batch failed: {}", e),
+        venue!(ix_binance, "binance", async {
+            let (status, body) =
+                http_get_text_with_status(client, &parsers::binance_batch_url(&s_binance)).await?;
+            if status == HTTP_BAD_REQUEST {
+                eprintln!("Binance rejected the batch ({}), retrying per symbol", body.trim());
+                return Ok(fetch_per_symbol(&s_binance, |s| fetch_binance(client, s)).await);
             }
-        }
+            if !(200..300).contains(&status) {
+                anyhow::bail!("HTTP {}", status);
+            }
+            parsers::parse_binance_batch(&body, &s_binance)
+        });
 
-        let binance_us = index_symbols(configs, |c: &ExchangeConfig| c.binance_us.as_deref());
-        if !binance_us.is_empty() {
-            let symbols: Vec<&str> = binance_us.keys().copied().collect();
-            let url = parsers::binance_us_batch_url(&symbols);
-            match http_get_text_with_status(client, &url).await {
-                Ok((status, body)) => {
-                    let parsed = if status == HTTP_BAD_REQUEST {
-                        eprintln!("Binance.US rejected the batch ({}), retrying per symbol", body.trim());
-                        Ok(fetch_per_symbol(&symbols, |s| fetch_binance_us(client, s)).await)
-                    } else if !(200..300).contains(&status) {
-                        Err(anyhow::anyhow!("HTTP {}", status))
-                    } else {
-                        parsers::parse_binance_batch(&body, &symbols)
-                    };
-                    match parsed {
-                        Ok(prices) => {
-                            fan_out(&mut out, &binance_us, &prices, "binance_us", fetched_now)
-                        }
-                        Err(e) => eprintln!("binance_us batch failed: {}", e),
-                    }
-                }
-                Err(e) => eprintln!("binance_us batch failed: {}", e),
+        venue!(ix_binance_us, "binance_us", async {
+            let (status, body) =
+                http_get_text_with_status(client, &parsers::binance_us_batch_url(&s_binance_us))
+                    .await?;
+            if status == HTTP_BAD_REQUEST {
+                eprintln!("Binance.US rejected the batch ({}), retrying per symbol", body.trim());
+                return Ok(fetch_per_symbol(&s_binance_us, |s| fetch_binance_us(client, s)).await);
             }
-        }
+            if !(200..300).contains(&status) {
+                anyhow::bail!("HTTP {}", status);
+            }
+            parsers::parse_binance_batch(&body, &s_binance_us)
+        });
 
         // Binance serves the Alpha listing gzipped by default, hence the identity encoding
-        venue!(
-            |c: &ExchangeConfig| c.binance_alpha.as_deref(),
-            "binance_alpha",
-            addresses => {
-                let response = client
-                    .get(parsers::binance_alpha_url())
-                    .header("Accept-Encoding", "identity")
-                    .send()
-                    .await?;
-                if !response.status().is_success() {
-                    anyhow::bail!("HTTP {}", response.status());
-                }
-                parsers::parse_binance_alpha_batch(&response.text().await?, &addresses)
+        venue!(ix_binance_alpha, "binance_alpha", async {
+            let response = client
+                .get(parsers::binance_alpha_url())
+                .header("Accept-Encoding", "identity")
+                .timeout(BATCH_REQUEST_TIMEOUT)
+                .send()
+                .await?;
+            if !response.status().is_success() {
+                anyhow::bail!("HTTP {}", response.status());
             }
-        );
+            parsers::parse_binance_alpha_batch(&response.text().await?, &s_binance_alpha)
+        });
 
-        let pyth = index_symbols(configs, |c: &ExchangeConfig| c.pyth_id());
-        if !pyth.is_empty() {
-            let price_ids: Vec<&str> = pyth.keys().copied().collect();
-            let url = parsers::pyth_batch_url(&price_ids);
-            match http_get_text(client, &url).await {
-                Ok(body) => match parsers::parse_pyth_batch(&body, &price_ids) {
-                    Ok(prices) => fan_out(&mut out, &pyth, &prices, "pyth", pyth_publish_time),
-                    Err(e) => eprintln!("pyth batch failed: {}", e),
-                },
-                Err(e) => eprintln!("pyth batch failed: {}", e),
-            }
-        }
+        venue!(ix_pyth, "pyth", async {
+            let body = http_get_text(client, &parsers::pyth_batch_url(&s_pyth)).await?;
+            parsers::parse_pyth_batch(&body, &s_pyth)
+        });
 
-        let chainlink = index_symbols(configs, |c: &ExchangeConfig| c.chainlink.as_deref());
-        if !chainlink.is_empty() {
-            let feeds: Vec<&str> = chainlink.keys().copied().collect();
-            match fetch_chainlink_batch(client, &feeds).await {
-                Ok(prices) => fan_out(&mut out, &chainlink, &prices, "chainlink", fetched_now),
-                Err(e) => eprintln!("chainlink batch failed: {}", e),
-            }
-        }
+        venue!(ix_chainlink, "chainlink", fetch_chainlink_batch(client, &s_chainlink));
 
-        venue!(
-            |c: &ExchangeConfig| c.huobi.as_deref(),
-            "huobi",
-            symbols => {
-                let body = http_get_text(client, &parsers::huobi_batch_url()).await?;
-                parsers::parse_huobi_batch(&body, &symbols)
-            }
-        );
-        venue!(
-            |c: &ExchangeConfig| c.kucoin.as_deref(),
-            "kucoin",
-            symbols => {
-                let body = http_get_text(client, &parsers::kucoin_batch_url()).await?;
-                parsers::parse_kucoin_batch(&body, &symbols)
-            }
-        );
-        venue!(
-            |c: &ExchangeConfig| c.gate.as_deref(),
-            "gate",
-            pairs => {
-                let body = http_get_text(client, &parsers::gate_batch_url()).await?;
-                parsers::parse_gate_batch(&body, &pairs)
-            }
-        );
-        venue!(
-            |c: &ExchangeConfig| c.cryptocom.as_deref(),
-            "cryptocom",
-            instruments => {
-                let body = http_get_text(client, &parsers::cryptocom_batch_url()).await?;
-                parsers::parse_cryptocom_batch(&body, &instruments)
-            }
-        );
+        venue!(ix_huobi, "huobi", async {
+            let body = http_get_text(client, &parsers::huobi_batch_url()).await?;
+            parsers::parse_huobi_batch(&body, &s_huobi)
+        });
+        venue!(ix_kucoin, "kucoin", async {
+            let body = http_get_text(client, &parsers::kucoin_batch_url()).await?;
+            parsers::parse_kucoin_batch(&body, &s_kucoin)
+        });
+        venue!(ix_gate, "gate", async {
+            let body = http_get_text(client, &parsers::gate_batch_url()).await?;
+            parsers::parse_gate_batch(&body, &s_gate)
+        });
+        venue!(ix_cryptocom, "cryptocom", async {
+            let body = http_get_text(client, &parsers::cryptocom_batch_url()).await?;
+            parsers::parse_cryptocom_batch(&body, &s_cryptocom)
+        });
 
         // Kraken answers an unknown pair with an error object rather than a status code
-        let kraken = index_symbols(configs, |c: &ExchangeConfig| c.kraken.as_deref());
-        if !kraken.is_empty() {
-            let pairs: Vec<&str> = kraken.keys().copied().collect();
-            match http_get_text(client, &parsers::kraken_batch_url(&pairs)).await {
-                Ok(body) => {
-                    let parsed = if parsers::is_kraken_unknown_pair(&body) {
-                        eprintln!("Kraken rejected the batch ({}), retrying per pair", body.trim());
-                        Ok(fetch_per_symbol(&pairs, |p| fetch_kraken(client, p)).await)
-                    } else {
-                        parsers::parse_kraken_batch(&body, &pairs)
-                    };
-                    match parsed {
-                        Ok(prices) => fan_out(&mut out, &kraken, &prices, "kraken", fetched_now),
-                        Err(e) => eprintln!("kraken batch failed: {}", e),
-                    }
+        venue!(ix_kraken, "kraken", async {
+            let body = http_get_text(client, &parsers::kraken_batch_url(&s_kraken)).await?;
+            if parsers::is_kraken_unknown_pair(&body) {
+                eprintln!("Kraken rejected the batch ({}), retrying per pair", body.trim());
+                return Ok(fetch_per_symbol(&s_kraken, |p| fetch_kraken(client, p)).await);
+            }
+            parsers::parse_kraken_batch(&body, &s_kraken)
+        });
+
+        venue!(ix_coinbase, "coinbase", async {
+            let body = http_get_text(client, &parsers::coinbase_batch_url()).await?;
+            parsers::parse_coinbase_batch(&body, &s_coinbase)
+        });
+        venue!(ix_bitstamp, "bitstamp", async {
+            let body = http_get_text(client, &parsers::bitstamp_batch_url()).await?;
+            parsers::parse_bitstamp_batch(&body, &s_bitstamp)
+        });
+        venue!(ix_okx, "okx", async {
+            let body = http_get_text(client, &parsers::okx_batch_url()).await?;
+            parsers::parse_okx_batch(&body, &s_okx)
+        });
+        venue!(ix_bitget, "bitget", async {
+            let body = http_get_text(client, &parsers::bitget_batch_url()).await?;
+            parsers::parse_bitget_batch(&body, &s_bitget)
+        });
+        venue!(ix_mexc, "mexc", async {
+            let body = http_get_text(client, &parsers::mexc_batch_url()).await?;
+            parsers::parse_mexc_batch(&body, &s_mexc)
+        });
+
+        let results = join_all(jobs).await;
+
+        // Fan out in the queued order, so the per-source list stays comparable across cycles
+        let fetched_now = |_: &str, _: &parsers::BatchPrice| Some(current_timestamp());
+        for ((name, index), result) in meta.into_iter().zip(results) {
+            match result {
+                // Pyth carries the feed's own publish_time and its per-feed staleness rule
+                Ok(prices) if name == "pyth" => {
+                    fan_out(&mut out, index, &prices, name, pyth_publish_time)
                 }
-                Err(e) => eprintln!("kraken batch failed: {}", e),
+                Ok(prices) => fan_out(&mut out, index, &prices, name, fetched_now),
+                Err(e) => eprintln!("{} batch failed: {}", name, e),
             }
         }
-
-        venue!(
-            |c: &ExchangeConfig| c.coinbase.as_deref(),
-            "coinbase",
-            product_ids => {
-                let body = http_get_text(client, &parsers::coinbase_batch_url()).await?;
-                parsers::parse_coinbase_batch(&body, &product_ids)
-            }
-        );
-        venue!(
-            |c: &ExchangeConfig| c.bitstamp.as_deref(),
-            "bitstamp",
-            pairs => {
-                let body = http_get_text(client, &parsers::bitstamp_batch_url()).await?;
-                parsers::parse_bitstamp_batch(&body, &pairs)
-            }
-        );
-        venue!(
-            |c: &ExchangeConfig| c.okx.as_deref(),
-            "okx",
-            inst_ids => {
-                let body = http_get_text(client, &parsers::okx_batch_url()).await?;
-                parsers::parse_okx_batch(&body, &inst_ids)
-            }
-        );
-        venue!(
-            |c: &ExchangeConfig| c.bitget.as_deref(),
-            "bitget",
-            symbols => {
-                let body = http_get_text(client, &parsers::bitget_batch_url()).await?;
-                parsers::parse_bitget_batch(&body, &symbols)
-            }
-        );
-        venue!(
-            |c: &ExchangeConfig| c.mexc.as_deref(),
-            "mexc",
-            symbols => {
-                let body = http_get_text(client, &parsers::mexc_batch_url()).await?;
-                parsers::parse_mexc_batch(&body, &symbols)
-            }
-        );
 
         out
     }

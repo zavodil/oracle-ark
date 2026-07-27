@@ -41,6 +41,12 @@ MEXC ...  ─┘                     │             │  trigger      │   obs
    assets, which kept Kraken and Bitstamp rate-limited, dropped them from this side's median
    only, and made the deviation trigger fire on every cycle forever.
 
+   The venues are fetched **concurrently**, and each request carries an 8s deadline. The WASI
+   worker has no async runtime and must go one venue at a time; doing the same here makes the
+   poll cycle the *sum* of every venue's latency and lets one hanging endpoint stall everything
+   behind it — measured in production as a 57-78s cadence where ~15s was expected. Concurrently
+   the cycle costs the slowest venue, and the deadline bounds even that.
+
 3. **Triggering an update**: the scheduler sends a `call` request to the OutLayer coordinator with command `update_prices` and the list of tokens to refresh. **The scheduler does NOT send price data** — it only tells the TEE worker *which* tokens need updating. The worker then fetches prices from all configured sources independently inside the enclave, aggregates them, and writes the result to public storage.
 
    The worker fetches in **batches: one HTTP request per source covering every requested token**, not one per (token, source). A refresh should therefore be a **single call for the whole asset set** — that is one request per source per cycle.

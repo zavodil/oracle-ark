@@ -8,6 +8,7 @@ const sections = [
   { id: 'quick-start', name: 'Quick Start' },
   { id: 'governance', name: 'Governance & Security' },
   { id: 'data-freshness', name: 'Data Freshness & Attestation' },
+  { id: 'verifiable-prices', name: 'Verifiable Signed Prices' },
   { id: 'pyth-native', name: 'Pyth Interface' },
   { id: 'direct-outlayer', name: 'Direct OutLayer Integration' },
   { id: 'price-oracle', name: 'Price Oracle Contract' },
@@ -125,7 +126,7 @@ export default function DocsPage() {
                   <code className="text-green-400">
 {`near call price-oracle.near oracle_call '{
   "receiver_id": "your-contract.near",
-  "asset_ids": ["wrap.near", "aurora"],
+  "asset_ids": ["wrap.near", "eth.bridge.near"],
   "msg": ""
 }' --accountId your.near --deposit 0.02 --gas 200000000000000`}
                   </code>
@@ -351,6 +352,394 @@ Result: No human holds the signing key. Only verified TEE code can push prices.`
               <p className="text-dark-400 text-sm">
                 For a cross-chain view call, include the source block height in the WASI output so your contract can enforce its own deadline — OutLayer attests whatever the program returns.
               </p>
+            </section>
+
+            {/* Verifiable Signed Prices */}
+            <section id="verifiable-prices" className="mb-16">
+              <h2 className="text-2xl font-bold text-white mb-6">Verifiable Signed Prices</h2>
+
+              <p className="text-dark-300 mb-6">
+                Pull prices over HTTPS with an <strong className="text-white">Ed25519 signature</strong> you verify
+                yourself. You check the signature instead of trusting the transport, the operator, or us. Verification
+                works off-chain today and on-chain whenever you want it to — the signed bytes are the same.
+              </p>
+
+              <h3 className="text-lg font-semibold text-white mb-4">Why you would want this</h3>
+              <div className="grid md:grid-cols-2 gap-4 mb-6">
+                <div className="card">
+                  <h4 className="text-white font-semibold mb-2">No TEE infrastructure of your own</h4>
+                  <p className="text-dark-400 text-sm">
+                    Getting trustworthy prices normally means running your own enclave: attestation, key management,
+                    node operations, and the cost of keeping it alive. Here that work is already done and attested —
+                    you consume a signed feed and verify 64 bytes.
+                  </p>
+                </div>
+                <div className="card">
+                  <h4 className="text-white font-semibold mb-2">You stay in control of the on-chain write</h4>
+                  <p className="text-dark-400 text-sm">
+                    We do not push anything into your contract. You decide when to submit, at what cadence, and under
+                    which conditions — and you pay that gas yourself. No dependency on a relayer that could stall,
+                    disappear, or price its service however it likes.
+                  </p>
+                </div>
+                <div className="card">
+                  <h4 className="text-white font-semibold mb-2">The relayer does not have to be trusted</h4>
+                  <p className="text-dark-400 text-sm">
+                    Because the payload is signed at the source, whoever carries it cannot alter it. That can be your
+                    own server, a keeper bot, or anyone else — the signature, not the messenger, is what your contract
+                    checks.
+                  </p>
+                </div>
+                <div className="card">
+                  <h4 className="text-white font-semibold mb-2">One input among several</h4>
+                  <p className="text-dark-400 text-sm">
+                    Already reading other oracles? Use <code className="text-primary">exclude_sources</code> to drop
+                    the ones you consume directly, and this feed stays genuinely independent rather than echoing a
+                    price you already have.
+                  </p>
+                </div>
+              </div>
+
+              <div className="card border-primary/30 bg-primary/5 mb-8">
+                <p className="text-dark-300 text-sm mb-3">
+                  <strong className="text-white">What the signature proves.</strong> The feed is signed inside the
+                  enclave with a key whose name starts with{' '}
+                  <code className="text-primary">PROTECTED_</code>. That prefix is not a convention — OutLayer
+                  generates such secrets <strong className="text-white">inside the TEE</strong>, and their value is
+                  never shown to anyone, including the project owner (
+                  <a href="https://outlayer.fastnear.com/docs/secrets#creating-secrets" target="_blank"
+                     rel="noopener noreferrer" className="text-primary hover:underline">how PROTECTED_ secrets are created</a>).
+                  A valid signature therefore means the payload came out of the attested binary, not from an operator
+                  holding a key on a laptop. That key is <strong className="text-white">fixed in the worker&apos;s
+                  source</strong> and signs nothing else — in particular it never signs a NEAR transaction, so a feed
+                  signature can never be replayed as one, and no request can ask for a different signer.
+                </p>
+                <p className="text-dark-400 text-sm">
+                  It does <strong className="text-white">not</strong> mean the price is correct — that follows from
+                  auditing the (open-source) worker and from the sources it aggregates. Signature = origin, not truth.
+                </p>
+              </div>
+
+              <h3 className="text-lg font-semibold text-white mb-4">Step 1 — Get the public key (once)</h3>
+              <p className="text-dark-300 mb-4">
+                Ask the worker for the public half of the signing key and pin it in your code or contract.
+                <code className="text-primary"> get_public_key</code> is the one call that names a key:{' '}
+                <code className="text-primary">key_name</code> selects which{' '}
+                <code className="text-primary">PROTECTED_</code> secret to read, and it returns public
+                material only.
+              </p>
+              <pre className="bg-dark-900 rounded-lg p-4 overflow-x-auto mb-4">
+                <code className="text-sm text-dark-300">{`curl -sX POST https://api.outlayer.fastnear.com/call/price-oracle.near/price-oracle \\
+  -H "X-Payment-Key: $PAYMENT_KEY" -H "Content-Type: application/json" \\
+  -d '{
+    "input": { "command": "get_public_key", "key_name": "PROTECTED_RHEA_FEED_KEY" },
+    "secrets_ref": { "profile": "oracle", "account_id": "price-oracle.near" }
+  }'`}</code>
+              </pre>
+              <p className="text-dark-400 text-sm mb-4">
+                You do not have to take our word for that key — the call that produced it is recorded and attested,
+                and both records show the request and the response side by side:
+              </p>
+              <div className="card mb-6">
+                <ul className="text-dark-400 text-sm space-y-3">
+                  <li>
+                    <strong className="text-white">On-chain transaction.</strong> The execution is on NEAR, so the
+                    input and the returned public key are both public and immutable —{' '}
+                    <a href="https://nearblocks.io/txns/2ikGDGq6bKKCPhA2GkUWdvShXPmNue9zssownBBUPoU4/execution"
+                       target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">
+                      example transaction
+                    </a>. Anyone can read what was asked and what came back, years later.
+                  </li>
+                  <li>
+                    <strong className="text-white">TEE attestation.</strong> The same call has a TDX attestation —{' '}
+                    <a href="https://outlayer.fastnear.com/attestation/194943?network=mainnet"
+                       target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">
+                      example attestation
+                    </a>. Press <strong className="text-white">🔍 Load &amp; Verify from Blockchain</strong> there to
+                    pull the input and output straight from the chain and check them against the hashes committed in
+                    the quote. Since the Task Hash covers <code className="text-primary">output_hash</code>, a matching
+                    quote proves this exact public key came out of the attested binary inside the enclave.
+                  </li>
+                </ul>
+              </div>
+
+              <h3 className="text-lg font-semibold text-white mb-4">Step 2 — Request signed prices</h3>
+              <p className="text-dark-300 mb-4">
+                Note there is <strong className="text-white">no key parameter here</strong>. Unlike{' '}
+                <code className="text-primary">get_public_key</code>, this request cannot select a signing
+                key: the feed is always signed with the one key above, fixed in the worker&apos;s source.
+                A request that still sends <code className="text-primary">key_name</code> is accepted and the
+                field is ignored, so older clients keep working.
+              </p>
+              <pre className="bg-dark-900 rounded-lg p-4 overflow-x-auto mb-4">
+                <code className="text-sm text-dark-300">{`curl -sX POST https://api.outlayer.fastnear.com/call/price-oracle.near/price-oracle \\
+  -H "X-Payment-Key: $PAYMENT_KEY" -H "Content-Type: application/json" \\
+  -d '{
+    "input": {
+      "command": "get_signed_prices",
+      "tokens": ["wrap.near", "eth.bridge.near", "usdt.tether-token.near"],
+      "max_age_secs": 120,
+      "exclude_sources": ["pyth"]
+    },
+    "secrets_ref": { "profile": "oracle", "account_id": "price-oracle.near" }
+  }'`}</code>
+              </pre>
+
+              <div className="card mb-6 overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="border-b border-dark-700 text-left text-dark-300">
+                      <th className="py-2 px-3">Field</th>
+                      <th className="py-2 px-3">Default</th>
+                      <th className="py-2 px-3">Meaning</th>
+                    </tr>
+                  </thead>
+                  <tbody className="text-dark-400">
+                    <tr className="border-b border-dark-800">
+                      <td className="py-2 px-3"><code className="text-primary">tokens</code></td>
+                      <td className="py-2 px-3">required</td>
+                      <td className="py-2 px-3">Only the assets you ask for are fetched, signed and billed — request one or twenty, the rest of the feed is not your concern</td>
+                    </tr>
+                    <tr className="border-b border-dark-800">
+                      <td className="py-2 px-3"><code className="text-primary">max_age_secs</code></td>
+                      <td className="py-2 px-3">120</td>
+                      <td className="py-2 px-3">Reject (not just report) anything older. The whole request fails rather than returning a stale entry</td>
+                    </tr>
+                    <tr className="border-b border-dark-800">
+                      <td className="py-2 px-3"><code className="text-primary">exclude_sources</code></td>
+                      <td className="py-2 px-3">none</td>
+                      <td className="py-2 px-3">Drop sources you already consume yourself, so our feed stays an independent input. Unknown names are rejected, never ignored</td>
+                    </tr>
+                    <tr className="border-b border-dark-800">
+                      <td className="py-2 px-3"><code className="text-primary">sig_format</code></td>
+                      <td className="py-2 px-3"><code>json</code></td>
+                      <td className="py-2 px-3"><code>json</code> or <code>borsh</code></td>
+                    </tr>
+                    <tr className="border-b border-dark-800">
+                      <td className="py-2 px-3"><code className="text-primary">expo</code></td>
+                      <td className="py-2 px-3">-8</td>
+                      <td className="py-2 px-3">Price is an integer scaled by 10<sup>expo</sup></td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+
+              <details className="card mb-6">
+                <summary className="cursor-pointer text-white font-semibold">Example response (real output)</summary>
+                <pre className="bg-dark-950 rounded-lg p-4 overflow-x-auto mt-4">
+                  <code className="text-xs text-dark-300">{`{
+  "success": true,
+  "payload": "{\\"eth.bridge.near\\":{\\"price\\":\\"196837500000\\",\\"expo\\":-8,\\"publish_time\\":1785149621},\\"usdt.tether-token.near\\":{\\"price\\":\\"99908500\\",\\"expo\\":-8,\\"publish_time\\":1785149622},\\"wrap.near\\":{\\"price\\":\\"184283333\\",\\"expo\\":-8,\\"publish_time\\":1785149621}}",
+  "signature": "YC2Nd2IyViEp7JKIDqkehHT9bnn2qTJl8iP0frNrlK63NJTjNO0LbI8u28qmH66+mEP2IIi+NrC4oIkXxk/uBw==",
+  "public_key": "ed25519:FU6EnB4UaAiDCAxvQPkRUu5QQExgzvKQAX891wMEX3rU",
+  "sig_format": "json",
+  "error": null
+}`}</code>
+                </pre>
+                <p className="text-dark-400 text-sm mt-3">
+                  <code className="text-primary">payload</code> is a <strong className="text-white">string</strong>,
+                  not an object — it is the signed message. Keys are the oracle&apos;s own asset ids, sorted, so the
+                  bytes are reproducible.
+                  <code className="text-primary"> price</code> is an integer sent as a string (it is an i64; a JSON
+                  number would lose precision in some parsers). Real price ={' '}
+                  <code className="text-primary">price × 10^expo</code>, e.g. 184283333 × 10⁻⁸ = $1.84283333.
+                  <code className="text-primary"> publish_time</code> is the unix second at which the enclave read and
+                  aggregated the sources.
+                </p>
+              </details>
+
+              <div className="card border-red-500/30 bg-red-500/5 mb-6">
+                <p className="text-dark-300 text-sm">
+                  <strong className="text-white">The one rule that breaks integrations:</strong> verify the signature
+                  over the <strong className="text-white">exact bytes of the <code>payload</code> string</strong>.
+                  Do not parse it and re-serialize before verifying — key order, whitespace and number formatting will
+                  differ and the signature will fail. Parse it only <em>after</em> the signature checks out. For{' '}
+                  <code className="text-primary">borsh</code>, verify over{' '}
+                  <code className="text-primary">base64_decode(payload)</code>, not over the base64 text.
+                </p>
+              </div>
+
+              <details className="card mb-6">
+                <summary className="cursor-pointer text-white font-semibold">Verifying the signature (JavaScript / Python / Rust)</summary>
+                <div className="mt-4">
+                  <p className="text-dark-400 text-sm mb-2">JavaScript (Node 18+, no dependencies beyond a base58 helper):</p>
+                  <pre className="bg-dark-950 rounded-lg p-4 overflow-x-auto mb-4">
+                    <code className="text-xs text-dark-300">{`import { verify, createPublicKey } from 'node:crypto';
+import bs58 from 'bs58';
+
+const PINNED = 'ed25519:FU6EnB4UaAiDCAxvQPkRUu5QQExgzvKQAX891wMEX3rU';
+
+function verifyFeed(res) {
+  if (res.public_key !== PINNED) throw new Error('unexpected signing key');
+
+  // DER-wrap the raw 32-byte key so node's crypto can import it
+  const raw = bs58.decode(res.public_key.split(':')[1]);
+  const der = Buffer.concat([Buffer.from('302a300506032b6570032100', 'hex'), raw]);
+  const key = createPublicKey({ key: der, format: 'der', type: 'spki' });
+
+  const message = Buffer.from(res.payload, 'utf8');       // EXACT bytes, no re-serialize
+  if (!verify(null, message, key, Buffer.from(res.signature, 'base64')))
+    throw new Error('bad signature');
+
+  const prices = JSON.parse(res.payload);                  // safe only after verifying
+  const now = Math.floor(Date.now() / 1000);
+  for (const [asset, p] of Object.entries(prices)) {
+    if (now - p.publish_time > 120) throw new Error(\`\${asset} too old\`);
+  }
+  return prices;
+}`}</code>
+                  </pre>
+
+                  <p className="text-dark-400 text-sm mb-2">Python:</p>
+                  <pre className="bg-dark-950 rounded-lg p-4 overflow-x-auto mb-4">
+                    <code className="text-xs text-dark-300">{`import base64, base58, json
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+
+PINNED = "ed25519:FU6EnB4UaAiDCAxvQPkRUu5QQExgzvKQAX891wMEX3rU"
+
+def verify_feed(res):
+    assert res["public_key"] == PINNED, "unexpected signing key"
+    vk = Ed25519PublicKey.from_public_bytes(base58.b58decode(PINNED.split(":", 1)[1]))
+    vk.verify(base64.b64decode(res["signature"]), res["payload"].encode())  # raises if invalid
+    return json.loads(res["payload"])   # parse only after the signature is verified`}</code>
+                  </pre>
+
+                  <p className="text-dark-400 text-sm mb-2">Rust (also what an on-chain verifier does):</p>
+                  <pre className="bg-dark-950 rounded-lg p-4 overflow-x-auto">
+                    <code className="text-xs text-dark-300">{`use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+
+let key_bytes: [u8; 32] = bs58::decode(pinned_pubkey).into_vec()?.try_into().unwrap();
+let vk = VerifyingKey::from_bytes(&key_bytes)?;
+let sig = Signature::from_bytes(&base64_decode(signature_b64)?.try_into().unwrap());
+
+vk.verify(payload.as_bytes(), &sig)?;   // payload as received, byte for byte`}</code>
+                  </pre>
+                </div>
+              </details>
+
+              <h3 className="text-lg font-semibold text-white mb-4">Verifying inside a NEAR contract</h3>
+              <p className="text-dark-300 mb-4">
+                NEAR exposes Ed25519 verification as a host function, so checking the feed on-chain is cheap and needs
+                no crypto library. This is what makes the relayer untrusted: anyone may submit the payload, and the
+                contract accepts it purely on the signature.
+              </p>
+              <details className="card mb-6">
+                <summary className="cursor-pointer text-white font-semibold">Rust: a receiver anyone can call</summary>
+                <pre className="bg-dark-950 rounded-lg p-4 overflow-x-auto mt-4">
+                  <code className="text-xs text-dark-300">{`use near_sdk::{env, near, require, store::LookupMap};
+use near_sdk::base64::{engine::general_purpose::STANDARD, Engine};
+use near_sdk::serde::Deserialize;
+use std::collections::HashMap;
+
+/// The pinned feed key: base58 of "ed25519:..." decoded to 32 raw bytes.
+const FEED_PUBKEY: [u8; 32] = [/* 32 bytes */];
+const MAX_AGE_SECS: u64 = 120;
+
+#[derive(Deserialize)]
+#[serde(crate = "near_sdk::serde")]
+struct Entry {
+    price: String,      // i64 sent as a string to survive every JSON parser
+    expo: i32,
+    publish_time: i64,
+}
+
+#[near]
+impl Contract {
+    /// Permissionless: the caller is untrusted, the signature is what counts.
+    pub fn submit_prices(&mut self, payload: String, signature: String) {
+        // 1. Verify over the EXACT bytes received — never re-serialize first.
+        let sig: [u8; 64] = STANDARD.decode(&signature).expect("bad base64")
+            .try_into().expect("signature must be 64 bytes");
+        require!(
+            env::ed25519_verify(&sig, payload.as_bytes(), &FEED_PUBKEY),
+            "invalid feed signature"
+        );
+
+        // 2. Only after it verifies is the payload safe to parse.
+        let entries: HashMap<String, Entry> =
+            near_sdk::serde_json::from_str(&payload).expect("malformed payload");
+
+        let now = env::block_timestamp() / 1_000_000_000;
+        for (asset, e) in entries {
+            let published = e.publish_time as u64;
+            require!(now.saturating_sub(published) <= MAX_AGE_SECS, "price too old");
+
+            // 3. Replay guard: a signed payload stays valid forever, so refuse
+            //    anything that is not strictly newer than what we already store.
+            if let Some(prev) = self.prices.get(&asset) {
+                require!(published > prev.publish_time, "not newer than stored");
+            }
+
+            let price: i64 = e.price.parse().expect("bad price");
+            self.prices.insert(asset, StoredPrice { price, expo: e.expo, publish_time: published });
+        }
+    }
+}`}</code>
+                </pre>
+                <p className="text-dark-400 text-sm mt-3">
+                  Three checks carry the whole design: the signature (authenticity), the age bound (freshness), and the
+                  strictly-increasing <code className="text-primary">publish_time</code> (replay). Drop any of them and
+                  an old but validly signed payload can be replayed later.
+                </p>
+              </details>
+
+              <details className="card mb-6">
+                <summary className="cursor-pointer text-white font-semibold">Borsh format (for on-chain verification)</summary>
+                <p className="text-dark-400 text-sm mt-3 mb-3">
+                  Pass <code className="text-primary">&quot;sig_format&quot;: &quot;borsh&quot;</code>. The{' '}
+                  <code className="text-primary">payload</code> becomes base64 of the borsh bytes, and the signature is
+                  over the <strong className="text-white">decoded</strong> bytes. Layout of{' '}
+                  <code className="text-primary">BTreeMap&lt;String, PriceEntry&gt;</code>, keys ascending:
+                </p>
+                <pre className="bg-dark-950 rounded-lg p-4 overflow-x-auto">
+                  <code className="text-xs text-dark-300">{`u32  entry_count            (little-endian)
+repeated per entry:
+  u32  key_len               (little-endian)
+  ..   key bytes             (UTF-8)
+  i64  price                 (little-endian)
+  i32  expo                  (little-endian)
+  i64  publish_time          (little-endian)`}</code>
+                </pre>
+              </details>
+
+              <h3 className="text-lg font-semibold text-white mb-4">Running it in production</h3>
+              <ol className="list-decimal list-inside text-dark-300 space-y-3 mb-6">
+                <li>
+                  <strong className="text-white">Pin the public key</strong> from step 1 and verify its attestation
+                  once. Treat a changed key as a failure, not as something to auto-accept.
+                </li>
+                <li>
+                  <strong className="text-white">Poll on your own cadence.</strong> Prices are refreshed continuously,
+                  so a poll returns the cached value; set <code className="text-primary">max_age_secs</code> at or above
+                  the refresh interval so a normal poll never forces an outbound fetch.
+                </li>
+                <li>
+                  <strong className="text-white">Verify first, parse second</strong> — over the raw payload bytes.
+                </li>
+                <li>
+                  <strong className="text-white">Enforce freshness yourself.</strong> Check{' '}
+                  <code className="text-primary">publish_time</code> against your own bound; do not rely only on our
+                  server-side check.
+                </li>
+                <li>
+                  <strong className="text-white">Reject non-increasing timestamps</strong> if you write prices to a
+                  contract — that is what stops an old signed payload from being replayed. Note repeated polls within
+                  one refresh window legitimately return the same <code className="text-primary">publish_time</code>;
+                  treat that as &quot;no new data&quot;, not as an error.
+                </li>
+                <li>
+                  <strong className="text-white">Fail closed.</strong> A failed request or signature means no price —
+                  never fall back to an unsigned or stale value.
+                </li>
+              </ol>
+
+              <div className="card">
+                <p className="text-dark-400 text-sm">
+                  <strong className="text-white">Access.</strong> Calls need a payment key authorised for this project.
+                  If you already have an OutLayer payment key, ask for this project to be allowed on it; otherwise we
+                  can issue one. The request is compute-only — it never touches the chain and costs no gas.
+                </p>
+              </div>
             </section>
 
             {/* Native Pyth Interface */}
@@ -980,7 +1369,7 @@ const oracle = new Contract(account, 'price-oracle.near', {
 
 // View cached prices (free)
 const cached = await oracle.get_price_data({
-  asset_ids: ['wrap.near', 'aurora'],
+  asset_ids: ['wrap.near', 'eth.bridge.near'],
 });
 
 // Convert price

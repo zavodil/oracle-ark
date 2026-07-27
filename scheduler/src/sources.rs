@@ -33,8 +33,17 @@ pub async fn fetch_price(
         debug!("{} {}: ${:.4}", p.source_name, token, p.price);
     }
 
-    let mut values: Vec<f64> = prices.iter().map(|p| p.price).collect();
-    let median = parsers::median(&mut values);
+    let values: Vec<f64> = prices.iter().map(|p| p.price).collect();
+    // `median` returns None when no usable value is left — every source answered with a
+    // non-finite number. That is a failed refresh, never a price: the 0.0 this used to return
+    // would have been logged and pushed as a real quote of $0.00.
+    let median = parsers::median(&values).ok_or_else(|| {
+        anyhow::anyhow!(
+            "No usable price for {}: all {} source(s) returned non-finite values",
+            token,
+            values.len()
+        )
+    })?;
 
     // Log summary with sources list
     let source_names: Vec<&str> = prices.iter().map(|p| p.source_name.as_str()).collect();

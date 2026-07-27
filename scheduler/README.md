@@ -137,7 +137,7 @@ cargo run --release
 | `UPDATE_INTERVAL_SECS` | `60` | Max staleness before refresh, full asset set (seconds) |
 | `UPDATE_INTERVAL_PRIORITY_SECS` | `10` | Max staleness before refresh for priority assets (seconds) |
 | `POLL_INTERVAL_SECS` | `5` | How often the poll loop runs (seconds) |
-| `PRIORITY_ASSETS` | `wrap.near,nbtc.bridge.near,aurora` | Comma-separated assets refreshed on the priority interval |
+| `PRIORITY_ASSETS` | `wrap.near,nbtc.bridge.near,eth.bridge.near` | Comma-separated assets refreshed on the priority interval |
 | `PRICE_DIFF_THRESHOLD_PERCENT` | `1.0` | Price change % that triggers immediate refresh |
 | `GROUP_MAX_TOKENS` | `64` | Max tokens per refresh call — keep above the asset count so one batch request per source is made |
 | `FETCH_CONCURRENCY` | `3` | How many refresh groups run concurrently |
@@ -149,7 +149,7 @@ cargo run --release
 | `ORACLE_MIN_BALANCE_NEAR` | `0.05` | Minimum signer balance before alerting (NEAR) |
 | `SECRETS_PROFILE` | — | Secrets profile injected into WASI (required for on-chain push) |
 | `SECRETS_ACCOUNT_ID` | — | Account owning the secrets profile (required for on-chain push) |
-| `AGGREGATION_METHOD` | `median` | Aggregation: `median` / `average` / `weighted_average` |
+| `AGGREGATION_METHOD` | `median` | Aggregation: `median` / `average` / `weighted_average` (an alias of `average` — equal weights, no extra outlier resistance) |
 | `MIN_SOURCES_NUM` | `1` | Minimum sources required for valid price |
 | `API_KEY` | — | API key for premium price sources (CoinGecko Pro, etc.) |
 | `TELEGRAM_BOT_TOKEN` | — | Telegram bot token for failure alerts |

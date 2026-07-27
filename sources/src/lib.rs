@@ -9,6 +9,7 @@
 //! - `async` - Enable async client support (for scheduler)
 
 pub mod parsers;
+pub mod security;
 pub mod sources;
 
 pub use parsers::*;

@@ -386,7 +386,31 @@ pub mod sync {
         })
     }
 
-    pub fn fetch_custom(config: &CustomSourceConfig, api_key: Option<&str>) -> Result<SourcePrice> {
+    /// Fetch a price from a caller-defined URL.
+    ///
+    /// # This function sends no credential of ours
+    ///
+    /// It used to attach `Authorization: Bearer $API_KEY` to every request. The URL is chosen
+    /// by the caller and `API_KEY` is a credential the enclave holds on OUR behalf (CoinGecko
+    /// Pro, Alchemy), so one call naming `https://attacker.tld/` handed that credential over.
+    /// The twin in the `oracle-ark` binary answers this with a host allowlist; here the header
+    /// is simply gone, and there is no `api_key` parameter to pass one in. A custom source
+    /// that needs authentication carries its own credential in `config.headers`, where the
+    /// caller is spending their own secret rather than ours.
+    ///
+    /// # The URL is validated here, not by the caller
+    ///
+    /// `security::validate_url` runs before the request is built rather than being a
+    /// precondition documented for callers to honour. A "pass me a pre-validated URL" contract
+    /// is only as good as every future call site remembering it, and this function is `pub`:
+    /// the next caller inherits the guard instead of having to know about it. The check costs
+    /// one string parse against a request that is about to cross the network anyway.
+    pub fn fetch_custom(config: &CustomSourceConfig) -> Result<SourcePrice> {
+        // SSRF guard: the WASI worker sits inside a TEE with its own network namespace, so an
+        // unvalidated URL is a request to fetch whatever the worker can reach — link-local
+        // metadata endpoints, loopback services, private ranges — and return the body.
+        crate::security::validate_url(&config.url).map_err(|e| anyhow::anyhow!(e))?;
+
         let mut request = match config.method.to_uppercase().as_str() {
             "GET" => Client::new().get(&config.url)
             .header("User-Agent", USER_AGENT),
@@ -405,15 +429,9 @@ pub mod sync {
             _ => anyhow::bail!("Unsupported HTTP method: {}", config.method),
         };
 
-        // Add custom headers
+        // Add custom headers — the caller's own credentials, if the source needs any
         for (key, value) in &config.headers {
             request = request.header(key.as_str(), value.as_str());
-        }
-
-        // Add API_KEY as Bearer token if present
-        if let Some(key) = api_key {
-            let auth = format!("Bearer {}", key);
-            request = request.header("Authorization", auth.as_str());
         }
 
         let response = request.connect_timeout(CONNECT_TIMEOUT).send()?;
@@ -1033,6 +1051,55 @@ pub mod sync {
         }
 
         out
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn custom(url: &str) -> CustomSourceConfig {
+            CustomSourceConfig {
+                url: url.to_string(),
+                json_path: "price".to_string(),
+                value_type: "number".to_string(),
+                method: "GET".to_string(),
+                headers: Vec::new(),
+                body: None,
+            }
+        }
+
+        /// `fetch_custom` refuses a blocked destination itself, before it builds a request.
+        ///
+        /// The guard used to live only in the `oracle-ark` binary's copy of this code, so this
+        /// `pub fn` would have connected to any of these. No network is touched by this test:
+        /// validation runs first and returns, which is exactly the property being pinned.
+        ///
+        /// There is no assertion about the API key here because there is nothing left to
+        /// assert — the parameter that carried it is gone from the signature, so no caller can
+        /// hand this function a credential of ours to leak.
+        #[test]
+        fn fetch_custom_refuses_internal_targets() {
+            for url in [
+                "http://169.254.169.254/latest/meta-data/",
+                "http://127.0.0.1:8081/",
+                "http://10.1.2.3/internal",
+                "file:///etc/passwd",
+                "http://api.coingecko.com@127.0.0.1/x",
+            ] {
+                let error = fetch_custom(&custom(url))
+                    .expect_err(&format!("{} must be refused", url))
+                    .to_string();
+                assert!(
+                    error.contains("blocked"),
+                    "{} failed with '{}' instead of the SSRF guard",
+                    url,
+                    error
+                );
+            }
+
+            // A malformed URL is refused too, rather than being handed to the HTTP client
+            assert!(fetch_custom(&custom("not-a-url")).is_err());
+        }
     }
 }
 

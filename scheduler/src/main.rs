@@ -126,7 +126,9 @@ impl Config {
                 .parse()
                 .unwrap_or(5),
             priority_assets: env::var("PRIORITY_ASSETS")
-                .unwrap_or_else(|_| "wrap.near,nbtc.bridge.near,aurora".to_string())
+                // ETH is `eth.bridge.near`; the old `aurora` asset it replaced is the Aurora
+                // EVM account, not a distinct ETH feed (the AURORA token is a separate asset).
+                .unwrap_or_else(|_| "wrap.near,nbtc.bridge.near,eth.bridge.near".to_string())
                 .split(',')
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())

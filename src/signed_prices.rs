@@ -10,13 +10,62 @@
 //!
 //! A verifier MUST NOT re-serialize the payload before checking the signature: key order,
 //! float formatting and whitespace would all change the bytes.
+//!
+//! # Invariant: the key of every payload entry is OUR canonical `asset_id`
+//!
+//! Nothing a caller sends may influence it. A signature only certifies "this enclave
+//! observed this price for this asset", so the asset identity has to be ours end to end —
+//! the moment the requester picks the name, the signature certifies the requester's claim
+//! instead of our measurement. A rename map used to exist here and made exactly that
+//! possible: asking for `bitcoin` under the name `wrap.near` produced a payload our key
+//! had signed that said `wrap.near` was worth $118,000. A consumer checking the signature
+//! and reading the asset id off the payload — which is the whole point of the feed — would
+//! have priced $2.50 of collateral at $118,000. Consumers use our `asset_id` directly;
+//! an asset that needs a different name gets published as its own asset in the config.
 
 use crate::types::AggregationMethod;
 use base64::Engine;
 use borsh::BorshSerialize;
 use oracle_ark_sources::{parsers, ExchangeConfig};
 use serde::Serialize;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
+
+/// The one in-enclave Ed25519 key that signs this feed.
+///
+/// # Why this is a constant and not a request parameter
+///
+/// It used to be `key_name` on the request, validated only by the `PROTECTED_` prefix — so the
+/// CALLER chose which enclave key signed. Every `PROTECTED_` secret the worker holds was in
+/// reach, including `PROTECTED_KEY_RHEA`, the key that signs `report_prices` transactions.
+/// The feed payload is arbitrary caller-influenced bytes; a NEAR transaction is signed over a
+/// SHA-256 hash of its borsh encoding. Nothing about the signing primitive distinguishes the
+/// two, so "sign these bytes with the transaction key" is a request for a signature that may
+/// later be replayed as something else entirely. Who signs is our decision, not the caller's.
+///
+/// # Why there is no domain-separation tag
+///
+/// Because this key is fixed here and used ONLY for the feed, it can never sign a NEAR
+/// transaction: feed payloads and transaction hashes are separated by the KEY, not by a tag
+/// inside the message. That is a stronger separation than a prefix byte — it does not depend
+/// on every future code path remembering to add it.
+///
+/// # The invariant that makes it true
+///
+/// This key must NEVER be reused for transaction signing, on-chain or otherwise. The moment it
+/// signs anything but a feed payload the separation above collapses and a tagged domain would
+/// have to be introduced instead. `report_prices` uses its own separate key (see DAO_LOG.md),
+/// and `feed_signing_key_is_pinned_and_transaction_free` pins that they stay distinct.
+///
+/// Operationally this names the secret in the worker's secrets profile (`profile: "oracle"`,
+/// `account_id: "price-oracle.near"`). Its public half is what consumers pin, so changing this
+/// string changes the feed's identity: it requires creating the new secret, publishing the new
+/// public key, and updating every consumer that pinned the old one.
+///
+/// If you are adapting this worker: pick a name specific to YOUR deployment rather than a
+/// generic one. A shared-looking name invites two deployments to reach for the same secret and
+/// makes it ambiguous which enclave a given public key belongs to — and the identity of the
+/// signer is the entire value of the feed.
+pub const FEED_SIGNING_KEY: &str = "PROTECTED_RHEA_FEED_KEY";
 
 /// Default exponent of the signed feed: real price = `price * 10^expo`
 pub const DEFAULT_EXPO: i32 = -8;
@@ -128,47 +177,23 @@ pub fn scale_price(price: f64, expo: i32) -> Result<i64, String> {
     Ok(scaled as i64)
 }
 
-/// Resolve the key an asset is published under: the alias when the caller supplied one,
-/// our own asset_id otherwise.
-pub fn client_key(asset_id: &str, aliases: Option<&HashMap<String, String>>) -> String {
-    aliases
-        .and_then(|map| map.get(asset_id))
-        .cloned()
-        .unwrap_or_else(|| asset_id.to_string())
-}
-
 /// Build the payload entries from `(asset_id, price, timestamp)` triples.
-/// Keys are the client-facing keys (after alias remapping) and the `BTreeMap` gives the
+/// Keys are our canonical asset ids (see the module invariant) and the `BTreeMap` gives the
 /// deterministic ordering the signature depends on.
 pub fn build_entries(
     priced: &[(String, f64, u64)],
-    aliases: Option<&HashMap<String, String>>,
     expo: i32,
 ) -> Result<BTreeMap<String, PriceEntry>, String> {
     let mut entries: BTreeMap<String, PriceEntry> = BTreeMap::new();
-    // client key -> asset_id it came from, so a colliding alias map is rejected instead of
-    // silently publishing only one of the two assets
-    let mut origins: BTreeMap<String, String> = BTreeMap::new();
 
     for (asset_id, price, timestamp) in priced {
-        let key = client_key(asset_id, aliases);
         let entry = PriceEntry {
             price: scale_price(*price, expo).map_err(|e| format!("{}: {}", asset_id, e))?,
             expo,
             publish_time: i64::try_from(*timestamp)
                 .map_err(|_| format!("{}: timestamp {} does not fit i64", asset_id, timestamp))?,
         };
-
-        if let Some(previous) = origins.get(&key) {
-            if previous != asset_id {
-                return Err(format!(
-                    "alias collision: '{}' and '{}' both map to client key '{}'",
-                    previous, asset_id, key
-                ));
-            }
-        }
-        origins.insert(key.clone(), asset_id.clone());
-        entries.insert(key, entry);
+        entries.insert(asset_id.clone(), entry);
     }
 
     Ok(entries)
@@ -356,8 +381,13 @@ fn all_sources_configured() -> ExchangeConfig {
     }
 }
 
-/// Aggregate prices with the requested method (same math as `fetch_and_store_price`)
-pub fn aggregate(prices: &mut [f64], method: AggregationMethod) -> f64 {
+/// Aggregate prices with the requested method (same math as `fetch_and_store_price`).
+///
+/// `None` means no source produced a usable number, and every caller must surface that as a
+/// per-asset failure. It is deliberately not a price: the 0.0 these methods used to return
+/// for an empty input would have been signed and handed to a lending market as "this asset is
+/// worth nothing" — a statement our key would then be certifying.
+pub fn aggregate(prices: &[f64], method: AggregationMethod) -> Option<f64> {
     match method {
         AggregationMethod::Average => parsers::average(prices),
         AggregationMethod::Median => parsers::median(prices),
@@ -407,13 +437,13 @@ mod tests {
         reversed.reverse();
 
         let first = encode_payload(
-            &build_entries(&forward, None, DEFAULT_EXPO).unwrap(),
+            &build_entries(&forward, DEFAULT_EXPO).unwrap(),
             SigFormat::Json,
         )
         .unwrap()
         .0;
         let second = encode_payload(
-            &build_entries(&reversed, None, DEFAULT_EXPO).unwrap(),
+            &build_entries(&reversed, DEFAULT_EXPO).unwrap(),
             SigFormat::Json,
         )
         .unwrap()
@@ -430,32 +460,26 @@ mod tests {
         );
     }
 
+    /// Pins the module invariant: every payload key is our own asset_id.
+    ///
+    /// The removed alias map broke exactly this — pricing `bitcoin` under the name
+    /// `wrap.near` yielded a payload our key had signed claiming `wrap.near` was worth
+    /// $118,000, which any consumer reading the asset id off the verified payload would
+    /// have booked as collateral. If a change ever makes the key caller-controlled again,
+    /// this test is where it must fail.
     #[test]
-    fn aliases_rename_asset_ids() {
-        let mut aliases = HashMap::new();
-        aliases.insert("aurora".to_string(), "eth.bridge.near".to_string());
-
+    fn payload_keys_are_our_asset_ids() {
         let entries = build_entries(
             &[priced("aurora", 3000.0, 7), priced("wrap.near", 2.5, 7)],
-            Some(&aliases),
             DEFAULT_EXPO,
         )
         .unwrap();
 
-        assert!(entries.contains_key("eth.bridge.near"));
-        assert!(!entries.contains_key("aurora"));
-        assert!(entries.contains_key("wrap.near"));
-        assert_eq!(entries["eth.bridge.near"].price, 300_000_000_000);
-
-        // two assets mapped onto one client key must fail, not silently drop one
-        let mut colliding = HashMap::new();
-        colliding.insert("aurora".to_string(), "wrap.near".to_string());
-        assert!(build_entries(
-            &[priced("aurora", 3000.0, 7), priced("wrap.near", 2.5, 7)],
-            Some(&colliding),
-            DEFAULT_EXPO,
-        )
-        .is_err());
+        assert_eq!(
+            entries.keys().map(String::as_str).collect::<Vec<_>>(),
+            vec!["aurora", "wrap.near"]
+        );
+        assert_eq!(entries["aurora"].price, 300_000_000_000);
     }
 
     #[test]
@@ -465,7 +489,7 @@ mod tests {
         let (_, public_key) = near_tx::derive_implicit_account(&private_key).unwrap();
 
         let entries =
-            build_entries(&[priced("wrap.near", 2.5, 1784720718)], None, DEFAULT_EXPO).unwrap();
+            build_entries(&[priced("wrap.near", 2.5, 1784720718)], DEFAULT_EXPO).unwrap();
         let (payload, message) = encode_payload(&entries, SigFormat::Json).unwrap();
         assert_eq!(message, payload.as_bytes());
 
@@ -498,7 +522,7 @@ mod tests {
     #[test]
     fn borsh_payload_signs_the_decoded_bytes() {
         let entries =
-            build_entries(&[priced("wrap.near", 2.5, 1784720718)], None, DEFAULT_EXPO).unwrap();
+            build_entries(&[priced("wrap.near", 2.5, 1784720718)], DEFAULT_EXPO).unwrap();
         let (payload, message) = encode_payload(&entries, SigFormat::Borsh).unwrap();
 
         let decoded = base64::engine::general_purpose::STANDARD
@@ -531,17 +555,26 @@ mod tests {
         assert!(!is_excluded("binance", &["pyth".to_string()]));
     }
 
-    /// Locks the wire format the client sends: command tag, field names and defaults
+    /// Locks the wire format the client sends: command tag, field names and defaults.
+    ///
+    /// The request deliberately still carries two REMOVED fields, `aliases` and `key_name`. A
+    /// client that has not been updated must keep working — with its assets published under
+    /// our ids and its feed signed with our key — rather than being rejected, and neither
+    /// field may quietly come back to life through a future `Deserialize`.
+    ///
+    /// `key_name` mattered most: while it existed the caller chose which enclave key signed,
+    /// so a request naming the on-chain push key had that key sign caller-supplied bytes. It
+    /// is now ignored, not honoured, and there is no field left to name a key.
     #[test]
     fn request_json_parses_into_the_command() {
         use crate::types::OracleCommand;
 
         let request = r#"{
             "command": "get_signed_prices",
-            "tokens": ["wrap.near", "aurora"],
+            "tokens": ["wrap.near", "eth.bridge.near"],
             "max_age_secs": 60,
-            "key_name": "PROTECTED_ORACLE_KEY",
-            "aliases": {"aurora": "eth.bridge.near"},
+            "key_name": "PROTECTED_KEY_RHEA",
+            "aliases": {"eth.bridge.near": "ETH"},
             "exclude_sources": ["pyth"]
         }"#;
 
@@ -549,21 +582,14 @@ mod tests {
             OracleCommand::GetSignedPrices {
                 tokens,
                 max_age_secs,
-                key_name,
-                aliases,
                 sig_format,
                 expo,
                 exclude_sources,
                 aggregation_method,
                 min_sources_num,
             } => {
-                assert_eq!(tokens, vec!["wrap.near", "aurora"]);
+                assert_eq!(tokens, vec!["wrap.near", "eth.bridge.near"]);
                 assert_eq!(max_age_secs, 60);
-                assert_eq!(key_name, "PROTECTED_ORACLE_KEY");
-                assert_eq!(
-                    aliases.unwrap().get("aurora").map(String::as_str),
-                    Some("eth.bridge.near")
-                );
                 // omitted fields fall back to the documented defaults
                 assert_eq!(sig_format, None);
                 assert_eq!(expo, None);
@@ -573,6 +599,52 @@ mod tests {
             }
             other => panic!("wrong command parsed: {:?}", other),
         }
+
+        // The command re-serializes without either field, so a round-trip cannot reintroduce
+        // a way to name the signing key
+        let reserialized = serde_json::to_value(
+            serde_json::from_str::<OracleCommand>(request).unwrap(),
+        )
+        .unwrap();
+        assert!(reserialized.get("key_name").is_none());
+        assert!(reserialized.get("aliases").is_none());
+    }
+
+    /// The feed key is pinned in code and is only ever used to sign feed payloads.
+    /// `main::feed_signing_key_is_pinned_and_transaction_free` covers the handler side.
+    #[test]
+    fn feed_signing_key_is_a_tee_generated_key() {
+        assert!(FEED_SIGNING_KEY.starts_with("PROTECTED_"));
+        assert_ne!(FEED_SIGNING_KEY, "PROTECTED_KEY_RHEA");
+    }
+
+    /// Aggregating nothing usable must not produce a signable number.
+    ///
+    /// `build_entries`/`scale_price` reject a 0.0 that reaches them, but only after it has
+    /// been recorded as this asset's price; returning `None` here stops it one step earlier,
+    /// where the caller can name the asset that failed.
+    #[test]
+    fn aggregate_reports_nothing_usable_instead_of_zero() {
+        for method in [
+            AggregationMethod::Median,
+            AggregationMethod::Average,
+            AggregationMethod::WeightedAverage,
+        ] {
+            assert_eq!(aggregate(&[], method), None);
+            assert_eq!(aggregate(&[f64::NAN, f64::INFINITY], method), None);
+            assert_eq!(aggregate(&[2.5], method), Some(2.5));
+        }
+
+        // Median is the outlier-resistant one; the other two are the same equal-weight mean
+        let prices = [1.0, 1.0, 1.0, 100.0];
+        assert_eq!(aggregate(&prices, AggregationMethod::Median), Some(1.0));
+        assert_eq!(
+            aggregate(&prices, AggregationMethod::WeightedAverage),
+            aggregate(&prices, AggregationMethod::Average)
+        );
+
+        // and a 0.0 that somehow reached the payload is still refused by the scaler
+        assert!(scale_price(0.0, DEFAULT_EXPO).is_err());
     }
 
 

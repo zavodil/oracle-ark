@@ -76,13 +76,19 @@ fn check_price(price: f64, source: &str) -> Result<f64> {
 
 /// The (bid + ask + last) / 3 ladder the single-symbol parsers use, with the same
 /// fallbacks: all three when present, bid/ask when `last` is missing, `last` alone otherwise.
+///
+/// The sum is revalidated: `as_price` accepts each field on its own, but three finite values
+/// near the top of the f64 range add up to `inf`, and a `{"last":"1e308","highest_bid":
+/// "1e308","lowest_ask":"1e308"}` ticker turned into `u128::MAX` once scaled for the chain.
+/// Validating here covers the batch parsers too, which have no `check_price` of their own.
 fn blend(bid: Option<f64>, ask: Option<f64>, last: Option<f64>) -> Option<f64> {
-    match (bid, ask, last) {
-        (Some(b), Some(a), Some(l)) => Some((b + a + l) / 3.0),
-        (Some(b), Some(a), None) => Some((b + a) / 2.0),
-        (_, _, Some(l)) => Some(l),
-        _ => None,
-    }
+    let blended = match (bid, ask, last) {
+        (Some(b), Some(a), Some(l)) => (b + a + l) / 3.0,
+        (Some(b), Some(a), None) => (b + a) / 2.0,
+        (_, _, Some(l)) => l,
+        _ => return None,
+    };
+    check_price(blended, "blended bid/ask/last").ok()
 }
 
 /// CoinGecko serves paid keys on a different host: sending `x_cg_pro_api_key` to the free host
@@ -314,6 +320,31 @@ pub fn parse_binance_alpha_batch(body: &str, wanted: &[&str]) -> Result<BatchPri
 /// Pyth publishes sub-second, so anything this old means the feed stopped updating.
 pub const PYTH_MAX_AGE_SECS: u64 = 120;
 
+/// Accepted range of a Pyth exponent. Live feeds sit around -8; this leaves an order of
+/// magnitude of headroom while keeping `10^expo` finite and non-zero in f64.
+const MIN_PYTH_EXPO: i64 = -18;
+const MAX_PYTH_EXPO: i64 = 18;
+
+/// Turn a Pyth `(price, expo)` pair into a real price: `price * 10^expo`.
+///
+/// The exponent is bounded BEFORE the `as i32` cast, which wraps rather than saturates:
+/// `expo: 2147483648` becomes `i32::MIN` and prices the asset at 0, while `4294967296`
+/// becomes 0 and publishes the raw unscaled mantissa — a plausible-looking number that is
+/// wrong by eight orders of magnitude. The result then goes through `check_price`, so a
+/// dead feed answering `"0"`, `"-100"`, `"NaN"` or `"inf"` is a failed source rather than a
+/// value that enters the median.
+fn pyth_price(raw: f64, expo: i64) -> Result<f64> {
+    if !(MIN_PYTH_EXPO..=MAX_PYTH_EXPO).contains(&expo) {
+        return Err(anyhow!(
+            "Pyth exponent {} out of range ({}..={})",
+            expo,
+            MIN_PYTH_EXPO,
+            MAX_PYTH_EXPO
+        ));
+    }
+    check_price(raw * 10f64.powi(expo as i32), "Pyth")
+}
+
 /// Build Pyth Hermes API URL
 pub fn pyth_url(price_id: &str) -> String {
     format!("https://hermes.pyth.network/v2/updates/price/latest?ids[]={}", price_id)
@@ -380,10 +411,12 @@ pub fn parse_pyth_batch(body: &str, wanted: &[&str]) -> Result<BatchPrices> {
             Ok(raw) => raw,
             Err(_) => continue,
         };
-        let price = raw * 10f64.powi(feed.price.expo as i32);
-        if !price.is_finite() || price <= 0.0 {
-            continue;
-        }
+        // A feed we cannot price is dropped, not defaulted: the other feeds in the batch
+        // still publish
+        let price = match pyth_price(raw, feed.price.expo) {
+            Ok(price) => price,
+            Err(_) => continue,
+        };
         let key = originals.get(stripped_id).copied().unwrap_or(stripped_id);
         prices.insert(
             key.to_string(),
@@ -421,8 +454,7 @@ pub fn parse_pyth(json: &Value) -> Result<(f64, u64)> {
         .and_then(|v| v.as_u64())
         .ok_or_else(|| anyhow!("Publish time not found in Pyth response"))?;
 
-    let price = price_raw * 10f64.powi(expo as i32);
-    Ok((price, publish_time))
+    Ok((pyth_price(price_raw, expo)?, publish_time))
 }
 
 /// Ethereum RPC endpoints for Chainlink price feeds (tried in order, starting from last working)
@@ -534,11 +566,26 @@ fn encode_address_word(address: &str) -> Result<String> {
     Ok(format!("{:0>64}", hex.to_ascii_lowercase()))
 }
 
+/// Non-empty and made only of ASCII hex digits — the precondition for slicing a payload at
+/// fixed byte offsets.
+///
+/// This response is whatever a public Ethereum RPC returned, and `&text[a..b]` PANICS when
+/// an index falls inside a multi-byte char: `0x` + 63 hex chars + `é` + 63 hex chars is 128
+/// bytes, so it passes a `len % 64` check and then traps on the first word boundary. A trap
+/// is not one failed source — wasm32-wasip2 kills the instance, so the 7-RPC rotation never
+/// runs and every token loses every source for that invocation.
+fn is_ascii_hex(text: &str) -> bool {
+    !text.is_empty() && text.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
 /// Split a hex payload into 32-byte ABI words
 fn abi_words(hex_payload: &str) -> Result<Vec<&str>> {
     let hex = hex_payload.strip_prefix("0x").unwrap_or(hex_payload);
-    if hex.is_empty() || hex.len() % 64 != 0 {
-        return Err(anyhow!("Malformed ABI payload: {} hex chars", hex.len()));
+    if !is_ascii_hex(hex) || hex.len() % 64 != 0 {
+        return Err(anyhow!(
+            "Malformed ABI payload: expected a multiple of 64 hex chars, got {} bytes",
+            hex.len()
+        ));
     }
     Ok((0..hex.len() / 64).map(|i| &hex[i * 64..(i + 1) * 64]).collect())
 }
@@ -546,8 +593,12 @@ fn abi_words(hex_payload: &str) -> Result<Vec<&str>> {
 /// Read an ABI word as u128. Fails when the high 16 bytes are set, which for the int256
 /// `answer` also covers a negative price.
 fn word_to_u128(word: &str) -> Result<u128> {
-    if word.len() != 64 {
-        return Err(anyhow!("Malformed ABI word: {} hex chars", word.len()));
+    // Checked here as well as in `abi_words`, because this is the function that slices
+    if !is_ascii_hex(word) || word.len() != 64 {
+        return Err(anyhow!(
+            "Malformed ABI word: expected 64 hex chars, got {} bytes",
+            word.len()
+        ));
     }
     if word[..32].chars().any(|c| c != '0') {
         return Err(anyhow!("ABI word out of range: 0x{}", word));
@@ -725,9 +776,10 @@ pub fn parse_huobi(json: &Value) -> Result<f64> {
             .and_then(|v| v.get(0)),
     );
 
-    match (bid, ask) {
-        (Some(b), Some(a)) => check_price((b + a) / 2.0, "Huobi"),
-        _ => Err(anyhow!("Bid/Ask not found in Huobi response")),
+    // Huobi quotes no `last` here, so the ladder reduces to the (bid + ask) / 2 mid price
+    match blend(bid, ask, None) {
+        Some(price) => check_price(price, "Huobi"),
+        None => Err(anyhow!("Bid/Ask not found in Huobi response")),
     }
 }
 
@@ -770,13 +822,18 @@ pub fn parse_huobi_batch(body: &str, wanted: &[&str]) -> Result<BatchPrices> {
     let mut prices = BatchPrices::new();
     for ticker in response.data.unwrap_or_default() {
         if let Some(symbol) = index.get(&ticker.symbol.to_ascii_uppercase()) {
-            let bid = as_price(ticker.bid.as_ref());
-            let ask = as_price(ticker.ask.as_ref());
-            if let (Some(bid), Some(ask)) = (bid, ask) {
+            // Same ladder as the single-symbol path, which validates the mid price rather
+            // than trusting that two accepted fields cannot add up to something impossible
+            let price = blend(
+                as_price(ticker.bid.as_ref()),
+                as_price(ticker.ask.as_ref()),
+                None,
+            );
+            if let Some(price) = price {
                 prices.insert(
                     (*symbol).to_string(),
                     BatchPrice {
-                        price: (bid + ask) / 2.0,
+                        price,
                         timestamp: None,
                     },
                 );
@@ -1635,33 +1692,83 @@ pub fn parse_value(value: &Value, value_type: &str) -> Result<f64> {
     }
 }
 
-/// Calculate median of prices
-pub fn median(prices: &mut [f64]) -> f64 {
-    prices.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let len = prices.len();
-    if len == 0 {
-        return 0.0;
+// ============================================================================
+// Aggregation
+//
+// Every function here returns `Option<f64>`, and `None` means "nothing usable to aggregate".
+// They used to return 0.0 for that case, which is the single most dangerous value an oracle
+// can produce: it is a perfectly well-formed price that says the asset is worthless, and it
+// is indistinguishable at the call site from a real one. A lending market reading it marks
+// every position backed by that collateral as unsecured. `Option` moves the decision to the
+// caller and makes forgetting it a compile error rather than a liquidation.
+// ============================================================================
+
+/// Keep only the values that may take part in an aggregate.
+///
+/// A non-finite value is not a price. NaN poisons every arithmetic it touches (and used to
+/// panic the median's sort comparator), and an infinity dominates a mean outright, so both are
+/// dropped here instead of being averaged in.
+fn usable_prices(prices: &[f64]) -> Vec<f64> {
+    prices.iter().copied().filter(|p| p.is_finite()).collect()
+}
+
+/// Reject an aggregate that is not a real number even though every input was.
+///
+/// Two finite prices near the top of the f64 range sum to infinity, so the last step is
+/// checked rather than assumed. `blend` applies the same check one stage earlier, where a
+/// `{"last":"1e308",...}` ticker became `u128::MAX` once scaled for the chain.
+fn finite(value: f64) -> Option<f64> {
+    value.is_finite().then_some(value)
+}
+
+/// Median of the usable prices, or `None` when none are left.
+///
+/// Two things a naive median must not do here. `partial_cmp(...).unwrap()` PANICS on a NaN,
+/// and a panic under wasm32-wasip2 traps the whole module — one poisoned source would end
+/// the invocation for every token instead of costing that token one source. And a NaN that
+/// survives the sort can land in the middle of the slice and BE the published price, so
+/// non-finite values are dropped rather than ordered.
+pub fn median(prices: &[f64]) -> Option<f64> {
+    let mut usable = usable_prices(prices);
+    if usable.is_empty() {
+        return None;
     }
-    if len % 2 == 0 {
-        (prices[len / 2 - 1] + prices[len / 2]) / 2.0
+
+    usable.sort_by(f64::total_cmp);
+    let len = usable.len();
+    let median = if len % 2 == 0 {
+        (usable[len / 2 - 1] + usable[len / 2]) / 2.0
     } else {
-        prices[len / 2]
-    }
+        usable[len / 2]
+    };
+    finite(median)
 }
 
-/// Calculate arithmetic average of prices
-pub fn average(prices: &[f64]) -> f64 {
-    if prices.is_empty() {
-        return 0.0;
+/// Arithmetic mean of the usable prices, or `None` when none are left.
+///
+/// Non-finite inputs are dropped here for the same reason `median` drops them: a single NaN
+/// would otherwise make the whole mean NaN, and `serde_json` writes a NaN out as `null`, so
+/// the poisoned value would land in the price cache as a field no reader can parse.
+pub fn average(prices: &[f64]) -> Option<f64> {
+    let usable = usable_prices(prices);
+    if usable.is_empty() {
+        return None;
     }
-    let sum: f64 = prices.iter().sum();
-    sum / prices.len() as f64
+    let sum: f64 = usable.iter().sum();
+    finite(sum / usable.len() as f64)
 }
 
-/// Calculate weighted average (currently equal weights, can be extended)
-pub fn weighted_average(prices: &[f64]) -> f64 {
-    // For now, use equal weights (same as average)
-    // Can be extended with reputation-based weighting
+/// Equal-weight mean — an exact ALIAS for [`average`], not a weighting scheme.
+///
+/// The name is a leftover and it oversells what happens: every source counts the same, so a
+/// single bad venue moves this by 1/n of its error exactly as it moves the plain mean. It is
+/// NOT more outlier-resistant than `average`; [`median`] is the setting that resists outliers,
+/// and it is the default for that reason. Weighting by anything real — venue depth, historical
+/// deviation, source uptime — needs data this oracle does not collect, so the honest thing is
+/// to document the alias rather than invent weights that would look authoritative and mean
+/// nothing. The name is kept because `"weighted_average"` is already accepted by the request
+/// API and by the scheduler's `AGGREGATION_METHOD`; renaming it would break live callers.
+pub fn weighted_average(prices: &[f64]) -> Option<f64> {
     average(prices)
 }
 
@@ -1716,11 +1823,67 @@ mod tests {
 
     #[test]
     fn test_median() {
-        let mut prices = vec![5.0, 1.0, 3.0];
-        assert_eq!(median(&mut prices), 3.0);
+        assert_eq!(median(&[5.0, 1.0, 3.0]), Some(3.0));
+        assert_eq!(median(&[4.0, 1.0, 3.0, 2.0]), Some(2.5));
+    }
 
-        let mut prices = vec![4.0, 1.0, 3.0, 2.0];
-        assert_eq!(median(&mut prices), 2.5);
+    /// A NaN used to panic the sort comparator, and a panic inside WASI traps the module —
+    /// the invocation dies for every token, not just the one with the bad source
+    #[test]
+    fn test_median_survives_non_finite_inputs() {
+        // The NaN is dropped, not ordered: the median is the median of the real prices
+        assert_eq!(median(&[1.0, f64::NAN, 3.0, 5.0]), Some(3.0));
+        assert_eq!(median(&[f64::INFINITY, 2.0, 4.0, f64::NEG_INFINITY]), Some(3.0));
+        assert_eq!(median(&[f64::NAN, 2.5]), Some(2.5));
+    }
+
+    /// "Nothing usable" must not be expressible as a price.
+    ///
+    /// These three returned 0.0 for an empty (or all-non-finite) slice, and 0.0 is not a
+    /// sentinel — it is a valid, catastrophic price that says the asset is worthless. It is
+    /// the same shape as the bug that published DAI at $0.50: a source that answered
+    /// successfully with an impossible number, carried all the way to a consumer that had no
+    /// way to tell it apart from a measurement. `None` is not a number, so it cannot be
+    /// published by accident.
+    #[test]
+    fn test_aggregates_report_nothing_usable_instead_of_zero() {
+        for aggregate in [
+            median as fn(&[f64]) -> Option<f64>,
+            average,
+            weighted_average,
+        ] {
+            assert_eq!(aggregate(&[]), None);
+            assert_eq!(aggregate(&[f64::NAN, f64::INFINITY, f64::NEG_INFINITY]), None);
+            // and a usable value among the junk still prices
+            assert_eq!(aggregate(&[f64::NAN, 2.5]), Some(2.5));
+        }
+
+        // A single NaN used to make the whole mean NaN, which serde_json then wrote out as
+        // `null` — a cache entry no reader can parse
+        assert_eq!(average(&[1.0, f64::NAN, 3.0]), Some(2.0));
+
+        // Finite inputs whose aggregate overflows are also "nothing usable", not infinity
+        assert_eq!(median(&[f64::MAX, f64::MAX]), None);
+        assert_eq!(average(&[f64::MAX, f64::MAX, f64::MAX]), None);
+    }
+
+    /// `weighted_average` is documented as an alias for `average`, so pin that it IS one.
+    /// If someone ever implements real weights, this test is where the docs and the API
+    /// contract have to be revisited rather than silently drifting apart.
+    #[test]
+    fn test_weighted_average_is_an_honest_alias_of_average() {
+        for prices in [
+            vec![1.0, 2.0, 3.0],
+            vec![1.0, 1.0, 1.0, 100.0], // an outlier moves both identically
+            vec![2.5],
+        ] {
+            assert_eq!(weighted_average(&prices), average(&prices));
+        }
+
+        // The point of the doc comment: it gives no outlier resistance, unlike the median
+        let with_outlier = [1.0, 1.0, 1.0, 100.0];
+        assert_eq!(weighted_average(&with_outlier), Some(25.75));
+        assert_eq!(median(&with_outlier), Some(1.0));
     }
 
     #[test]
@@ -1828,6 +1991,78 @@ mod tests {
         assert!(url.contains("ignore_invalid_price_ids=true"));
         assert!(url.contains("&ids[]=c415de8d"));
         assert!(!url.contains("0xc415de8d"));
+    }
+
+    /// Builds the single-feed Hermes envelope `parse_pyth` reads
+    fn pyth_response(price: &str, expo: Value) -> Value {
+        json!({
+            "parsed": [{
+                "id": "c415de8d2eba7db216527dff4b60e8f3a5311c740dadb233e13e12547e226750",
+                "price": { "price": price, "conf": "211694", "expo": expo,
+                           "publish_time": 1785143368 }
+            }]
+        })
+    }
+
+    /// `parse_pyth` returned whatever arithmetic produced, while its batch twin already
+    /// filtered. Pyth is configured for every asset we price, so a dead feed answering "0"
+    /// poisoned 18 medians at once — the same failure that published DAI at $0.50 — and a
+    /// NaN additionally panicked `median`, killing the invocation.
+    #[test]
+    fn test_parse_pyth_rejects_impossible_prices() {
+        let (price, publish_time) = parse_pyth(&pyth_response("183487211", json!(-8))).unwrap();
+        assert!(approx(price, 1.83487211));
+        assert_eq!(publish_time, 1785143368);
+
+        // A delisted feed keeps answering with a zero rather than disappearing
+        assert!(parse_pyth(&pyth_response("0", json!(-8))).is_err());
+        assert!(parse_pyth(&pyth_response("-100", json!(-8))).is_err());
+        assert!(parse_pyth(&pyth_response("NaN", json!(-8))).is_err());
+        assert!(parse_pyth(&pyth_response("inf", json!(-8))).is_err());
+        assert!(parse_pyth(&pyth_response("-inf", json!(-8))).is_err());
+
+        // `expo as i32` wraps: 2147483648 becomes i32::MIN and prices the asset at 0,
+        // 4294967296 becomes 0 and publishes the raw mantissa as if it were dollars
+        assert!(parse_pyth(&pyth_response("183487211", json!(2147483648i64))).is_err());
+        assert!(parse_pyth(&pyth_response("183487211", json!(4294967296i64))).is_err());
+        assert!(parse_pyth(&pyth_response("183487211", json!(-2147483649i64))).is_err());
+        assert!(parse_pyth(&pyth_response("183487211", json!(19))).is_err());
+
+        // The batch twin drops the same feeds, and keeps pricing the healthy ones
+        let body = r#"{"parsed":[
+            {"id":"c415de8d2eba7db216527dff4b60e8f3a5311c740dadb233e13e12547e226750",
+             "price":{"price":"183487211","conf":"1","expo":-8,"publish_time":1785143368}},
+            {"id":"ff61491a931112ddf1bd8147cd1b641375f79f5825126d665480874634fd0ace",
+             "price":{"price":"195656091864","conf":"1","expo":4294967296,"publish_time":1785143368}}
+        ]}"#;
+        let near = "c415de8d2eba7db216527dff4b60e8f3a5311c740dadb233e13e12547e226750";
+        let eth = "ff61491a931112ddf1bd8147cd1b641375f79f5825126d665480874634fd0ace";
+        let prices = parse_pyth_batch(body, &[near, eth]).unwrap();
+        assert!(approx(prices[near].price, 1.83487211));
+        assert!(!prices.contains_key(eth));
+    }
+
+    /// `as_price` clears each field on its own, but the sum of three of them can still
+    /// overflow to inf — which becomes `u128::MAX` once scaled for the chain
+    #[test]
+    fn test_blended_price_cannot_overflow_to_infinity() {
+        let body = r#"[{"currency_pair":"NEAR_USDT","last":"1e308","highest_bid":"1e308","lowest_ask":"1e308"}]"#;
+        let prices = parse_gate_batch(body, &["near_usdt"]).unwrap();
+        assert!(prices.is_empty(), "inf must not be published as a price");
+
+        // Same ladder, same guarantee, on every venue that blends bid/ask/last
+        let kucoin = r#"{"code":"200000","data":{"ticker":[{"symbol":"NEAR-USDT","buy":"1e308","sell":"1e308","last":"1e308"}]}}"#;
+        assert!(parse_kucoin_batch(kucoin, &["NEAR-USDT"]).unwrap().is_empty());
+
+        let cryptocom = r#"{"code":0,"result":{"data":[{"i":"NEAR_USDT","a":"1e308","b":"1e308","k":"1e308","t":1785143379900}]}}"#;
+        assert!(parse_cryptocom_batch(cryptocom, &["NEAR_USDT"]).unwrap().is_empty());
+
+        let huobi = r#"{"status":"ok","data":[{"symbol":"nearusdt","bid":1e308,"ask":1e308}]}"#;
+        assert!(parse_huobi_batch(huobi, &["nearusdt"]).unwrap().is_empty());
+
+        // and the single-symbol parsers still reject it too
+        let gate = json!({"result":"true","last":"1e308","highestBid":"1e308","lowestAsk":"1e308"});
+        assert!(parse_gate(&gate).is_err());
     }
 
     #[test]
@@ -2277,6 +2512,40 @@ mod tests {
         // An RPC-level error is surfaced instead of being read as a missing result
         let json = json!({ "error": { "code": -32000, "message": "header not found" } });
         assert!(parse_chainlink_multicall(&json, &["0x1"]).is_err());
+    }
+
+    /// The decoder slices a hex string that arrived from a public Ethereum RPC. Slicing at a
+    /// byte offset inside a multi-byte char PANICS, and a panic under wasm32-wasip2 traps the
+    /// module: the 7-RPC rotation never runs, so one malformed response costs every token
+    /// every source for that invocation. Malformed input must be an error, never a trap.
+    #[test]
+    fn test_multicall_decoder_rejects_malformed_hex_instead_of_trapping() {
+        // 128 bytes, so a `len % 64` length check passes — but word boundary 64 lands
+        // inside the 'é'
+        let split_char = format!("0x{}é{}", "a".repeat(63), "a".repeat(63));
+        assert!(abi_words(&split_char).is_err());
+        assert!(parse_chainlink_multicall(&json!({ "result": &split_char }), &["0x1"]).is_err());
+
+        // The second slicing site: 64 bytes, with index 32 inside the 'é'
+        let word = format!("{}é{}", "a".repeat(31), "a".repeat(31));
+        assert_eq!(word.len(), 64);
+        assert!(word_to_u128(&word).is_err());
+
+        // Odd and non-multiple lengths stay errors
+        assert!(abi_words("0xabc").is_err());
+        assert!(abi_words("0x").is_err());
+        assert!(abi_words(&"a".repeat(63)).is_err());
+
+        // Non-hex ASCII is refused rather than reaching from_str_radix as a "valid" word
+        assert!(abi_words(&format!("0x{}", "z".repeat(64))).is_err());
+        assert!(word_to_u128(&format!("{}!", "0".repeat(63))).is_err());
+
+        // ...and a well-formed payload still decodes
+        assert_eq!(
+            word_to_u128(&format!("{:064x}", 0x20)).unwrap(),
+            0x20
+        );
+        assert_eq!(abi_words(&format!("0x{}", "0".repeat(128))).unwrap().len(), 2);
     }
 
     #[test]

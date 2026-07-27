@@ -4,6 +4,9 @@
 //! This module only handles Custom sources which need special JSON path extraction.
 
 use crate::types::CustomSourceConfig;
+// The SSRF guard and the API_KEY allowlist live in `oracle-ark-sources` so that this path and
+// `oracle_ark_sources::sources::sync::fetch_custom` cannot drift apart — see that module.
+use oracle_ark_sources::security;
 use std::env;
 use std::error::Error;
 use std::time::Duration;
@@ -63,7 +66,7 @@ pub fn fetch_custom_value(config: &CustomSourceConfig) -> Result<serde_json::Val
 fn fetch_custom_raw(config: &CustomSourceConfig) -> Result<serde_json::Value, Box<dyn Error>> {
     // Block requests to local/private network resources (SSRF guard).
     // Standard sources use hard-coded URLs; only custom sources take a caller-supplied URL.
-    crate::security::validate_url(&config.url)?;
+    security::validate_url(&config.url)?;
 
     // Build HTTP request
     let mut request = match config.method.to_uppercase().as_str() {
@@ -95,10 +98,14 @@ fn fetch_custom_raw(config: &CustomSourceConfig) -> Result<serde_json::Value, Bo
         request = request.header(key.as_str(), value.as_str());
     }
 
-    // Auto-add Authorization Bearer if API_KEY is in environment
-    if let Ok(api_key) = env::var("API_KEY") {
-        let auth_header = format!("Bearer {}", api_key);
-        request = request.header("Authorization", auth_header.as_str());
+    // Auto-add Authorization Bearer if API_KEY is in environment — but only for the
+    // providers the key belongs to. The URL is caller-supplied, so attaching it to every
+    // request published an OutLayer-managed secret to whoever asked for it.
+    if security::may_receive_api_key(&config.url) {
+        if let Ok(api_key) = env::var("API_KEY") {
+            let auth_header = format!("Bearer {}", api_key);
+            request = request.header("Authorization", auth_header.as_str());
+        }
     }
 
     // Send request

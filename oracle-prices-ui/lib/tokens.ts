@@ -12,6 +12,12 @@ export interface TokenInfo {
   pyth?: string;
   chainlink?: string;
   binance_alpha?: string;
+  kraken?: string;
+  coinbase?: string;
+  bitstamp?: string;
+  okx?: string;
+  bitget?: string;
+  mexc?: string;
 }
 
 export interface TokensConfig {
@@ -48,7 +54,9 @@ export async function fetchTokenConfigs(): Promise<TokensConfig> {
 // Token display names
 export const TOKEN_NAMES: Record<string, string> = {
   'wrap.near': 'NEAR',
-  'aurora': 'ETH',
+  // ETH is published as eth.bridge.near. The former `aurora` asset was the Aurora EVM
+  // account used as an ETH feed; AURORA below is the separate governance token.
+  'eth.bridge.near': 'ETH',
   'usdt.tether-token.near': 'USDT',
   '17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1': 'USDC',
   'nbtc.bridge.near': 'BTC',
@@ -60,12 +68,17 @@ export const TOKEN_NAMES: Record<string, string> = {
   '22.contract.portalbridge.near': 'SOL',
   'zec.omft.near': 'ZEC',
   'token.rhealab.near': 'RHEA',
+  'xrp.omft.near': 'XRP',
+  'doge.omft.near': 'DOGE',
+  'cardano.omft.near': 'ADA',
+  'xlm': 'XLM',
+  'ltc.omft.near': 'LTC',
 };
 
 // Token icons (single letter abbreviations)
 export const TOKEN_ICONS: Record<string, string> = {
   'wrap.near': 'N',
-  'aurora': 'E',
+  'eth.bridge.near': 'E',
   'usdt.tether-token.near': 'T',
   '17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1': 'C',
   'nbtc.bridge.near': 'B',
@@ -77,6 +90,11 @@ export const TOKEN_ICONS: Record<string, string> = {
   '22.contract.portalbridge.near': 'S',
   'zec.omft.near': 'Z',
   'token.rhealab.near': 'R',
+  'xrp.omft.near': 'X',
+  'doge.omft.near': 'D',
+  'cardano.omft.near': 'A',
+  'xlm': 'X',
+  'ltc.omft.near': 'L',
 };
 
 // Get token display name
@@ -109,6 +127,12 @@ export function getSourceCount(contractId: string, config: TokensConfig): number
   if (token.pyth) count++;
   if (token.chainlink) count++;
   if (token.binance_alpha) count++;
+  if (token.kraken) count++;
+  if (token.coinbase) count++;
+  if (token.bitstamp) count++;
+  if (token.okx) count++;
+  if (token.bitget) count++;
+  if (token.mexc) count++;
   return count;
 }
 
@@ -119,7 +143,7 @@ export function formatContractId(contractId: string): string {
 }
 
 // Pinned assets at the top (in order)
-const PINNED_ASSETS = ['wrap.near', 'nbtc.bridge.near', 'aurora'];
+const PINNED_ASSETS = ['wrap.near', 'nbtc.bridge.near', 'eth.bridge.near'];
 
 // Sort tokens: pinned first, then by source count desc, stablecoins last
 export function sortTokens(tokens: string[], config: TokensConfig): string[] {
@@ -142,7 +166,7 @@ export function sortTokens(tokens: string[], config: TokensConfig): string[] {
 // Default tokens to display (used as loading skeleton)
 export const DEFAULT_TOKENS = [
   'wrap.near',
-  'aurora',
+  'eth.bridge.near',
   'nbtc.bridge.near',
   'usdt.tether-token.near',
   '17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1',

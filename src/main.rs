@@ -1,5 +1,4 @@
 mod near_tx;
-mod security;
 mod signed_prices;
 mod sources;
 mod storage_types;
@@ -55,8 +54,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             OracleCommand::GetSignedPrices {
                 tokens,
                 max_age_secs,
-                key_name,
-                aliases,
                 sig_format,
                 expo,
                 exclude_sources,
@@ -66,8 +63,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let response = handle_get_signed_prices(
                     &tokens,
                     max_age_secs,
-                    &key_name,
-                    aliases.as_ref(),
                     sig_format.as_deref(),
                     expo,
                     exclude_sources.as_deref(),
@@ -386,17 +381,40 @@ fn handle_update_prices(
     }
 }
 
+/// Gate every request-supplied environment variable name behind the `PROTECTED_` prefix.
+///
+/// `get_public_key` and the per-asset `oracle_keys` of `update_prices` let the caller name the
+/// variable to read. The prefix is what keeps that choice inside the set of keys the enclave
+/// generated for signing, instead of any secret the worker happens to hold — the oracle
+/// contract enforces the same rule on `push_signer_key`.
+///
+/// `get_signed_prices` is NOT in that list any more: a prefix check still let the caller pick
+/// WHICH signing key signed, including the on-chain push key, so its key is pinned in code as
+/// `signed_prices::FEED_SIGNING_KEY` and is not a request field at all. The prefix is a floor,
+/// not a substitute for deciding who signs.
+fn require_protected_key_name(key_name: &str) -> Result<(), String> {
+    if !key_name.starts_with("PROTECTED_") {
+        return Err("key_name must start with PROTECTED_".to_string());
+    }
+    Ok(())
+}
+
 /// Sign and send report_prices transaction to the oracle contract
 /// Uses a PROTECTED_ key (TEE-generated) and derives implicit account from it
 fn report_prices_to_contract(contract_id: &str, key_name: &str, args: &str) -> Result<String, String> {
+    require_protected_key_name(key_name)?;
+
     let signer_key = env::var(key_name)
         .map_err(|_| format!("{} not set", key_name))?;
     let rpc_url = env::var("NEAR_RPC_URL")
         .unwrap_or_else(|_| "https://rpc.mainnet.near.org".to_string());
 
-    // Derive implicit account ID from the protected key
+    // Derive implicit account ID from the protected key. The parse error is deliberately
+    // dropped: bs58 reports the offending character and its index, so a caller who can pick
+    // the key name and read the error (it is logged and sent to Telegram) can walk the
+    // secret out one position at a time.
     let (signer_id, _) = near_tx::derive_implicit_account(&signer_key)
-        .map_err(|e| format!("Failed to derive implicit account from {}: {}", key_name, e))?;
+        .map_err(|_| format!("{} does not hold a valid ed25519 key", key_name))?;
 
     near_tx::call(
         &rpc_url,
@@ -633,15 +651,16 @@ fn signed_prices_error(sig_format: &str, error: String) -> SignedPricesResponse 
 /// Handle get_signed_prices command - signed pull feed for external consumers
 ///
 /// Prices come from the same cache-or-fetch path as get_prices, then get scaled to i64,
-/// keyed by the client's own names and signed in-enclave. The caller receives the exact
+/// keyed by our canonical asset_id and signed in-enclave. The caller receives the exact
 /// bytes we signed, so it can verify off-chain now and on-chain later without
 /// re-serializing anything.
+///
+/// The signing key is `signed_prices::FEED_SIGNING_KEY` and nothing in the request can point
+/// at another one — see that constant for why the caller does not get to choose the signer.
 #[allow(clippy::too_many_arguments)]
 fn handle_get_signed_prices(
     tokens: &[String],
     max_age_secs: u64,
-    key_name: &str,
-    aliases: Option<&HashMap<String, String>>,
     sig_format: Option<&str>,
     expo: Option<i32>,
     exclude_sources: Option<&[String]>,
@@ -655,10 +674,7 @@ fn handle_get_signed_prices(
     };
     let format_str = format.as_str();
 
-    // Only TEE-held keys may sign the feed (same rule as get_public_key)
-    if !key_name.starts_with("PROTECTED_") {
-        return signed_prices_error(format_str, "key_name must start with PROTECTED_".to_string());
-    }
+    let key_name = signed_prices::FEED_SIGNING_KEY;
 
     if tokens.is_empty() {
         return signed_prices_error(format_str, "tokens must not be empty".to_string());
@@ -686,10 +702,15 @@ fn handle_get_signed_prices(
             )
         }
     };
+    // The parse error itself never reaches the caller: it quotes the first character it
+    // could not decode and its index, which over repeated calls reconstructs the secret
     let public_key = match near_tx::derive_implicit_account(&private_key) {
         Ok((_, public_key)) => public_key,
-        Err(e) => {
-            return signed_prices_error(format_str, format!("Key derivation failed: {}", e))
+        Err(_) => {
+            return signed_prices_error(
+                format_str,
+                format!("{} does not hold a valid ed25519 key", key_name),
+            )
         }
     };
 
@@ -759,7 +780,7 @@ fn handle_get_signed_prices(
         );
     }
 
-    let entries = match signed_prices::build_entries(&priced, aliases, expo) {
+    let entries = match signed_prices::build_entries(&priced, expo) {
         Ok(e) => e,
         Err(e) => return signed_prices_error(format_str, e),
     };
@@ -853,14 +874,29 @@ fn collect_prices_excluding_sources(
                     .collect();
 
                 if !kept.is_empty() && kept.len() >= min_sources_num as usize {
-                    let mut prices: Vec<f64> = kept.iter().map(|s| s.price).collect();
-                    results.push(PriceResult {
-                        token,
-                        price: Some(signed_prices::aggregate(&mut prices, aggregation_method)),
-                        timestamp: Some(stored.timestamp),
-                        sources: Some(kept.iter().map(|s| s.name.clone()).collect()),
-                        from_cache: Some(true),
-                        error: None,
+                    let prices: Vec<f64> = kept.iter().map(|s| s.price).collect();
+                    // A cache entry whose kept sources aggregate to nothing usable is a
+                    // failure for this asset, not a zero price to be signed
+                    results.push(match signed_prices::aggregate(&prices, aggregation_method) {
+                        Some(price) => PriceResult {
+                            token,
+                            price: Some(price),
+                            timestamp: Some(stored.timestamp),
+                            sources: Some(kept.iter().map(|s| s.name.clone()).collect()),
+                            from_cache: Some(true),
+                            error: None,
+                        },
+                        None => PriceResult {
+                            token,
+                            price: None,
+                            timestamp: None,
+                            sources: None,
+                            from_cache: None,
+                            error: Some(format!(
+                                "No usable cached price: {} source(s) kept, none finite",
+                                kept.len()
+                            )),
+                        },
                     });
                     continue;
                 }
@@ -918,14 +954,30 @@ fn collect_prices_excluding_sources(
             continue;
         }
 
-        let mut prices: Vec<f64> = source_prices.iter().map(|p| p.price).collect();
-        results.push(PriceResult {
-            token,
-            price: Some(signed_prices::aggregate(&mut prices, aggregation_method)),
-            timestamp: Some(current_timestamp()),
-            sources: Some(source_prices.iter().map(|p| p.source_name.clone()).collect()),
-            from_cache: Some(false),
-            error: None,
+        let prices: Vec<f64> = source_prices.iter().map(|p| p.price).collect();
+        results.push(match signed_prices::aggregate(&prices, aggregation_method) {
+            Some(price) => PriceResult {
+                token,
+                price: Some(price),
+                timestamp: Some(current_timestamp()),
+                sources: Some(source_prices.iter().map(|p| p.source_name.clone()).collect()),
+                from_cache: Some(false),
+                error: None,
+            },
+            // Same rule as the cached branch: no usable number is an error for this asset.
+            // handle_get_signed_prices refuses to sign a partial feed, so this asset failing
+            // fails the request rather than shipping a zero to a lending market.
+            None => PriceResult {
+                token,
+                price: None,
+                timestamp: None,
+                sources: None,
+                from_cache: None,
+                error: Some(format!(
+                    "No usable price: {} source(s) answered, none finite",
+                    source_prices.len()
+                )),
+            },
         });
     }
 
@@ -1014,7 +1066,8 @@ fn handle_force_update(
 ///
 /// API_KEY secret (if configured in OutLayer) is used for authentication:
 /// - CoinGecko: passed as x_cg_pro_api_key query param
-/// - Custom: added as Authorization: Bearer header
+/// - Custom: added as Authorization: Bearer header, but only for the hosts in
+///   `oracle_ark_sources::security::API_KEY_HOSTS` — the URL is caller-supplied
 fn handle_fetch_external(token_id: &str, source: &ExternalPriceSource) -> ExternalPriceResponse {
     // Universal API_KEY - works for all sources that need authentication
     let api_key = env::var("API_KEY").ok();
@@ -1126,7 +1179,7 @@ fn aggregate_and_store_price(
     }
 
     // Get all prices
-    let mut prices: Vec<f64> = source_prices.iter().map(|p| p.price).collect();
+    let prices: Vec<f64> = source_prices.iter().map(|p| p.price).collect();
 
     // Check price deviation between sources
     let deviation = parsers::price_deviation(&prices);
@@ -1147,11 +1200,30 @@ fn aggregate_and_store_price(
         );
     }
 
-    // Calculate aggregated price based on method
-    let aggregated_price = match aggregation_method {
-        AggregationMethod::Average => parsers::average(&prices),
-        AggregationMethod::Median => parsers::median(&mut prices),
-        AggregationMethod::WeightedAverage => parsers::weighted_average(&prices),
+    // Calculate aggregated price based on method.
+    //
+    // `None` means every source that answered carried a non-finite number, so there is no
+    // price to store. It is reported as a per-token failure and alerted on: this can only
+    // happen if a parser let a value through that `check_price` should have rejected, which
+    // is an oracle defect, not a market condition. The aggregation used to return 0.0 here,
+    // which would have been written to the cache and reported on-chain as a real $0.00 quote.
+    let aggregated_price = match signed_prices::aggregate(&prices, aggregation_method) {
+        Some(price) => price,
+        None => {
+            telegram::send_alert(
+                "No Usable Price",
+                &format!(
+                    "Token: {}\n{} source(s) answered but none returned a finite price",
+                    token,
+                    prices.len()
+                ),
+            );
+            return Err(format!(
+                "No usable price for {}: {} source(s) answered, none finite",
+                token,
+                prices.len()
+            ));
+        }
     };
 
     let timestamp = current_timestamp();
@@ -1257,12 +1329,12 @@ struct TestTelegramResponse {
 
 /// Handle get_public_key command - returns implicit account ID and public key for a PROTECTED_ key
 fn handle_get_public_key(key_name: &str) -> types::PublicKeyResponse {
-    if !key_name.starts_with("PROTECTED_") {
+    if let Err(e) = require_protected_key_name(key_name) {
         return types::PublicKeyResponse {
             success: false,
             implicit_account_id: None,
             public_key: None,
-            error: Some("key_name must start with PROTECTED_".to_string()),
+            error: Some(e),
         };
     }
     match env::var(key_name) {
@@ -1273,11 +1345,13 @@ fn handle_get_public_key(key_name: &str) -> types::PublicKeyResponse {
                 public_key: Some(public_key),
                 error: None,
             },
-            Err(e) => types::PublicKeyResponse {
+            // Never the parse error: it names the character it choked on and where, so a
+            // caller naming one PROTECTED_ variable after another could read them out
+            Err(_) => types::PublicKeyResponse {
                 success: false,
                 implicit_account_id: None,
                 public_key: None,
-                error: Some(format!("Key derivation failed: {}", e)),
+                error: Some(format!("{} does not hold a valid ed25519 key", key_name)),
             },
         },
         Err(_) => types::PublicKeyResponse {
@@ -1318,5 +1392,76 @@ fn handle_test_telegram(custom_message: Option<&str>) -> TestTelegramResponse {
             message: "Telegram not configured".to_string(),
             error: Some("TELEGRAM_CHAT_ID environment variable not set".to_string()),
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Two commands still read an environment variable the caller names. `oracle_keys` reached
+    /// `env::var` without this check, so an `update_prices` request could pick any secret in
+    /// the worker's environment — including one that is not a signing key at all — and then
+    /// learn about it from the failure that followed.
+    #[test]
+    fn key_names_from_a_request_must_be_protected() {
+        assert!(require_protected_key_name("PROTECTED_ORACLE_KEY").is_ok());
+        assert!(require_protected_key_name("PROTECTED_ORACLE_KEY_A").is_ok());
+
+        assert!(require_protected_key_name("API_KEY").is_err());
+        assert!(require_protected_key_name("TELEGRAM_BOT_TOKEN").is_err());
+        assert!(require_protected_key_name("").is_err());
+        // the prefix is a prefix, not a substring
+        assert!(require_protected_key_name("MY_PROTECTED_ORACLE_KEY").is_err());
+        assert!(require_protected_key_name("protected_oracle_key").is_err());
+
+        // Every request-facing entry point that still takes a key name applies it
+        assert!(handle_get_public_key("API_KEY").error.is_some());
+        assert!(report_prices_to_contract("price-oracle.near", "API_KEY", "{}").is_err());
+    }
+
+    /// `get_signed_prices` takes no key name at all any more, so the prefix check is not what
+    /// protects it — the absence of the parameter is.
+    ///
+    /// A caller used to pass `key_name`, and `PROTECTED_KEY_RHEA` (the key that signs
+    /// `report_prices` transactions) passed the prefix check like any other. This asserts the
+    /// signer is fixed, is a TEE-generated key, and is not the transaction key — the property
+    /// that lets the feed skip a domain-separation tag.
+    #[test]
+    fn feed_signing_key_is_pinned_and_transaction_free() {
+        assert!(signed_prices::FEED_SIGNING_KEY.starts_with("PROTECTED_"));
+        assert!(require_protected_key_name(signed_prices::FEED_SIGNING_KEY).is_ok());
+
+        // The on-chain push signer registered with the oracle contract (DEPLOY.md,
+        // INIT_MAINNET.md, scripts/PROPOSALS.md). If these ever became the same string, the
+        // feed and NEAR transactions would share a key and the separation would be gone.
+        for transaction_key in [
+            "PROTECTED_KEY_RHEA",
+            "PROTECTED_KEY_NEAR",
+            "PROTECTED_KEY_ETH",
+            "PROTECTED_ORACLE_KEY",
+        ] {
+            assert_ne!(
+                signed_prices::FEED_SIGNING_KEY, transaction_key,
+                "the feed must not be signed with a key that also signs transactions"
+            );
+        }
+
+        // And the handler cannot be pointed anywhere else: it takes no key argument. Without
+        // the secret in the environment it fails on the pinned name, before any fetch.
+        let signed = handle_get_signed_prices(
+            &["wrap.near".to_string()],
+            120,
+            None,
+            None,
+            None,
+            AggregationMethod::Median,
+            1,
+        );
+        assert!(!signed.success);
+        assert!(signed
+            .error
+            .unwrap()
+            .contains(signed_prices::FEED_SIGNING_KEY));
     }
 }

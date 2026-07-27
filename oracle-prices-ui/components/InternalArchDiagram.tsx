@@ -159,7 +159,7 @@ export default function InternalArchDiagram() {
     ctx.font = '11px system-ui, sans-serif';
     ctx.textAlign = 'left';
     ctx.fillText('price:wrap.near', 55, 220);
-    ctx.fillText('price:aurora', 55, 238);
+    ctx.fillText('price:eth.bridge.near', 55, 238);
     ctx.fillText('price:nbtc...', 55, 256);
 
     // OutLayer Coordinator

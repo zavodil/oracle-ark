@@ -94,9 +94,20 @@ Set `API_KEY` environment variable (via NEAR OutLayer encrypted secrets):
 
 The worker will automatically:
 1. Read `API_KEY` from environment
-2. Add `Authorization: Bearer {API_KEY}` header to every custom-source request (both GET and POST) whenever the `API_KEY` secret is set
+2. Add `Authorization: Bearer {API_KEY}` header (GET and POST alike) **only when the URL points at an allowlisted provider over HTTPS** — see below
 3. Send the request (POST with JSON body, or GET)
 4. Extract value from response using `json_path`
+
+### Where the API key is allowed to go
+
+`API_KEY` is a credential OutLayer holds for us, while the custom-source URL comes from the
+caller. It is therefore sent only to the hosts listed in `API_KEY_HOSTS`
+(`src/security.rs`) — today `pro-api.coingecko.com` and `g.alchemy.com` — matched exactly or
+on a dot boundary, and only over `https://`. Every other URL is fetched **without** the
+header; a custom source pointing anywhere else must carry its own credential in `headers`.
+
+Adding a host to that list hands our key to its operator, so it is a deliberate decision
+rather than a config change.
 
 ### JSON Path
 
@@ -137,5 +148,5 @@ API_KEY="your-key" ./target/release/wasi-test \
 
 - Body is only sent for POST requests (ignored for GET)
 - If `body` is provided, `Content-Type: application/json` is auto-added (unless already specified)
-- API keys can be passed via `API_KEY` environment variable (automatically added as a Bearer token to every custom-source request, both GET and POST)
+- API keys can be passed via `API_KEY` environment variable (added as a Bearer token to GET and POST requests, but only for the allowlisted HTTPS hosts above)
 - JSON path extraction works the same for both GET and POST responses

@@ -262,7 +262,7 @@ export default function HomePage() {
                 <code className="text-green-400">
 {`near call price-oracle.near oracle_call '{
   "receiver_id": "your-contract.near",
-  "asset_ids": ["wrap.near", "aurora"],
+  "asset_ids": ["wrap.near", "eth.bridge.near"],
   "msg": ""
 }' --accountId your.near --deposit 0.02 --gas 200000000000000`}
                 </code>

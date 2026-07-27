@@ -18,7 +18,12 @@ pub enum AggregationMethod {
     /// Median value (default, more robust against outliers)
     #[default]
     Median,
-    /// Weighted average (currently same as average, can be extended)
+    /// Equal-weight mean — an exact ALIAS for `Average`, kept because the value
+    /// `"weighted_average"` is already accepted by live callers.
+    ///
+    /// It gives NO extra outlier resistance despite the name: one bad venue moves it by 1/n
+    /// of its error, exactly as it moves `Average`. Choose `Median` for outlier resistance.
+    /// See `parsers::weighted_average` for why no real weighting is invented here.
     WeightedAverage,
 }
 
@@ -88,19 +93,17 @@ pub enum OracleCommand {
     /// Get prices signed in-enclave with an Ed25519 key (pull model, no gas on our side)
     /// Consumers verify the signature over the exact bytes of the returned payload,
     /// off-chain today and on-chain later. Freshness follows get_prices semantics.
+    ///
+    /// There is deliberately NO field naming the signing key: it is pinned in code as
+    /// `signed_prices::FEED_SIGNING_KEY`. A caller that still sends the old `key_name` is
+    /// parsed normally and the field is ignored (serde skips unknown fields), so an
+    /// un-updated client keeps working — with our key, not one of its choosing.
     GetSignedPrices {
         /// Asset ids to price — every one must resolve, otherwise the request fails
         tokens: Vec<String>,
         /// Maximum age of cached price in seconds (default: 120)
         #[serde(default = "default_max_age")]
         max_age_secs: u64,
-        /// PROTECTED_ environment variable holding the in-enclave Ed25519 signing key
-        key_name: String,
-        /// Optional rename map: our asset_id -> client key
-        /// E.g., {"aurora": "eth.bridge.near"} publishes our aurora feed as eth.bridge.near
-        /// Assets not in this map keep our asset_id as the key
-        #[serde(default)]
-        aliases: Option<std::collections::HashMap<String, String>>,
         /// Payload format: "json" (default) or "borsh"
         #[serde(default)]
         sig_format: Option<String>,
@@ -183,7 +186,9 @@ pub enum ExternalPriceSource {
     Binance,
     Pyth,
     /// Custom source - fetch from any URL with JSON path extraction
-    /// Use API_KEY environment variable (via secrets) to pass API keys
+    /// The API_KEY secret is attached only for allowlisted providers (see
+    /// `oracle_ark_sources::security::may_receive_api_key`); any other source must carry its
+    /// own credential in `headers`
     Custom(CustomSourceConfig),
 }
 

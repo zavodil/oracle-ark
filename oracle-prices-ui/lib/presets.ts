@@ -27,7 +27,7 @@ export const PRICE_ORACLE_PRESETS: Preset[] = [
     method: 'oracle_call',
     args: {
       receiver_id: 'YOUR_CONTRACT.near',
-      asset_ids: ['wrap.near', 'aurora'],
+      asset_ids: ['wrap.near', 'eth.bridge.near'],
       msg: '',
     },
     deposit: '0.02',
@@ -267,7 +267,7 @@ export const VIEW_PRESETS: Preset[] = [
     contract: 'price-oracle.near',
     method: 'get_price_data',
     args: {
-      asset_ids: ['wrap.near', 'aurora', 'nbtc.bridge.near'],
+      asset_ids: ['wrap.near', 'eth.bridge.near', 'nbtc.bridge.near'],
     },
   },
 ];

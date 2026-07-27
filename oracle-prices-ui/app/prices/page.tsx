@@ -522,9 +522,10 @@ export default function PricesPage() {
               >
                 NEAR OutLayer
               </a>{' '}
-              public storage. NEAR, BTC and ETH refresh every ~16s; every other asset every ~60s;
-              Pyth and Chainlink run on their own 90s cycle. A 1% move refreshes early. Prices
-              older than 2 min are marked stale.
+              public storage. The most-used assets are refreshed on the fastest cycle, the rest on
+              a wider one, and a 1% move refreshes early regardless. Every price carries the
+              observation time of each source behind it — open <em>Price Sources</em> on any card
+              to see them. Prices older than 2 min are marked stale.
             </div>
             <div className="flex items-center gap-4 text-sm">
               <div className="flex items-center gap-2">

@@ -171,7 +171,7 @@ export default function InternalArchDiagram() {
     ctx.font = '11px system-ui, sans-serif';
     ctx.textAlign = 'left';
     const steps = [
-      'Fetch 10 sources',
+      'Fetch 16 sources',
       'Aggregate (median)',
       'Store in TEE storage',
       'report_prices',
@@ -239,7 +239,7 @@ export default function InternalArchDiagram() {
     ctx.fillStyle = colors.muted;
     ctx.font = '11px system-ui, sans-serif';
     ctx.textAlign = 'left';
-    ctx.fillText('Proactive pushing: prices always fresh in contract (30-60s updates)', 10, height - 15);
+    ctx.fillText('On-demand delivery is the fresh path; the on-chain push runs on its own slower cycle', 10, height - 15);
 
     // Legend color indicators
     const legendY = height - 38;

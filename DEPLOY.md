@@ -9,7 +9,7 @@
 └─────────────────────┘     └─────────────────────┘     └─────────────────────┘
         │                           │                           │
    Triggers updates           Fetches prices              Stores prices
-   every 60s or 1%           from APIs in TEE            for DeFi apps
+   on a schedule or 1%       from APIs in TEE            for DeFi apps
 ```
 
 All contract state mutations go through **DAO proposals** (council vote, >50% threshold).

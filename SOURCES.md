@@ -117,16 +117,20 @@ Sources are not all refreshed together. Each stored price keeps the **per-source
 time**, and a refresh merges into that record rather than replacing it, so venues can run at
 different cadences:
 
-| Tier | Venues | Cadence |
-|------|--------|---------|
-| fast | everything except the slow tier | ~13-15s, priority assets |
-| full | everything except the slow tier | 60s, every asset |
-| slow | `pyth`, `chainlink` | 90s, every asset |
+| Tier | Venues | Assets | Interval |
+|------|--------|--------|----------|
+| fast | everything except the slow tier | `PRIORITY_ASSETS` | `UPDATE_INTERVAL_PRIORITY_SECS` |
+| full | everything except the slow tier | all | `UPDATE_INTERVAL_SECS` |
+| slow | `SLOW_SOURCES` (`pyth`, `chainlink`) | all that configure them | `SLOW_SOURCE_INTERVAL_SECS` |
+
+The intervals are scheduler configuration and are deliberately not quoted here as numbers — they
+live in one `.env` on one host, and a figure copied into documentation outlives the setting it
+described. Read the effective values off the scheduler's startup log, or off the per-source
+timestamps in any stored record.
 
 The split exists because cost per refresh is wildly uneven: the exchange endpoints answer for
 the whole asset set in one request, while Chainlink is an EVM `eth_call` through Multicall3 and
-Pyth a separate API. Paying for those every cycle is what made a sub-20-second cadence
-unaffordable.
+Pyth a separate API. Paying for those on every cycle is what made a fast cadence unaffordable.
 
 Consumers pick their own window with `max_age_secs`, which filters **sources**: a request for 40
 seconds is answered from the venues seen within 40 seconds — the slow tier does not participate —

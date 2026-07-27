@@ -83,11 +83,11 @@ export default function DocsPage() {
               <div className="card mb-8">
                 <h3 className="text-lg font-semibold text-white mb-4">Key Features</h3>
                 <ul className="space-y-2 text-dark-300">
-                  <li>✓ Proactive price pushing — prices always fresh in contract (30-60s updates)</li>
+                  <li>✓ On-demand delivery — your contract gets the price in a callback, no dependency on a shared feed</li>
                   <li>✓ Zero trust — all data processed inside Intel TDX enclave</li>
                   <li>✓ DAO-governed — all configuration managed through council proposals</li>
                   <li>✓ TEE-only signing — only keys generated inside TEE can push prices</li>
-                  <li>✓ 10 price sources with median aggregation</li>
+                  <li>✓ 16 price sources with median aggregation</li>
                   <li>✓ Native Pyth-compatible API — migrate from pyth-oracle.near by changing one address</li>
                   <li>✓ Custom data fetching from any HTTP API</li>
                   <li>✓ Subsidized mode — free calls when contract has funds</li>
@@ -149,10 +149,18 @@ export default function DocsPage() {
                   <div>
                     <h3 className="text-lg font-semibold text-white mb-2">About View Methods (get_price_data)</h3>
                     <p className="text-dark-400 text-sm mb-3">
-                      <code className="text-primary">get_price_data</code> is a free view method. Prices are <strong className="text-white">proactively pushed</strong> to the contract every 30-60 seconds by TEE workers, so data is always fresh.
+                      <code className="text-primary">get_price_data</code> is a free view method, and it is the
+                      one path that can hand you a stale price without saying so. On-chain writes are a separate,
+                      much slower cycle than the off-chain feed, they cost gas, and they pause on their own when
+                      the pushing account runs low — so a view can legitimately return something minutes old, or
+                      nothing at all. <strong className="text-white">Check the timestamp it returns against your
+                      own bound and fail closed</strong>; never treat a view as evidence of freshness.
                     </p>
                     <p className="text-dark-400 text-sm">
-                      You can also call <code className="text-primary">request_price_data</code> to trigger an immediate on-demand update from TEE if needed.
+                      For anything that moves money, use <code className="text-primary">request_price_data</code>{' '}
+                      (or <code className="text-primary">oracle_call</code>): the price is fetched in the enclave
+                      for that call and delivered to your contract in a callback, so freshness is a property of the
+                      request rather than of whatever happens to be stored.
                     </p>
                   </div>
                 </div>
@@ -715,18 +723,19 @@ repeated per entry:
                 </li>
                 <li>
                   <strong className="text-white">Poll on your own cadence.</strong> Prices are refreshed continuously,
-                  so a poll returns the cached value. Ask for the window you actually need —{' '}
+                  so a poll normally returns the cached value. Ask for the window you actually need —{' '}
                   <code className="text-primary">max_age_secs: 40</code> means &quot;built only from venues seen in the
                   last 40 seconds&quot;. Narrowing it below our refresh cadence is allowed and simply makes the call
-                  fetch fresh, which costs a few seconds of latency; widening it lets the slower venues (Pyth,
-                  Chainlink, which run on a 2-minute cycle) contribute as well.
+                  fetch fresh, which costs a few seconds of latency; widening it lets the slower venues (Pyth and
+                  Chainlink, which run on their own wider cycle) contribute as well.
                   <br />
                   <span className="text-dark-400">
                     There is a practical floor: a fresh fetch takes several seconds, and the prices it produces are
-                    already that old when the request is answered. A window at or below roughly 15 seconds will
-                    therefore fail whenever the cache cannot serve it. Priority assets (NEAR, BTC, ETH) are kept
-                    inside ~15 seconds, so <code className="text-primary">max_age_secs: 20</code> is normally
-                    answered from cache and never has to fetch.
+                    already that old by the time the request is answered, so a very tight window fails whenever the
+                    cache cannot serve it. Do not guess where that floor is — the answer tells you.{' '}
+                    <code className="text-primary">publish_time</code> is the oldest source that contributed, so
+                    measure a few responses and set your window from what you observe. The assets under the heaviest
+                    use are refreshed on the fastest cycle.
                   </span>
                 </li>
                 <li>
@@ -772,14 +781,16 @@ repeated per entry:
                   <div>
                     <h3 className="text-lg font-semibold text-white mb-2">No refresh_prices Needed</h3>
                     <p className="text-dark-400 text-sm">
-                      Unlike the separate Pyth wrapper contract, the native interface reads directly from contract state which is
-                      proactively updated every 30-60 seconds by the scheduler. View methods always return fresh data.
+                      Unlike the separate Pyth wrapper contract, the native interface reads directly from contract
+                      state, so there is no refresh call to make. That state is written on its own slow, gas-paying
+                      cycle — read the timestamp it returns and enforce your own staleness bound, exactly as you
+                      would against any on-chain feed.
                     </p>
                   </div>
                 </div>
               </div>
 
-              <h3 className="text-lg font-semibold text-white mb-4">View Methods (free, always fresh)</h3>
+              <h3 className="text-lg font-semibold text-white mb-4">View Methods (free — check the timestamp)</h3>
               <div className="overflow-x-auto mb-8">
                 <table className="w-full text-left text-sm">
                   <thead>
@@ -1003,10 +1014,12 @@ or go direct for full customization.`}
                 <div className="flex items-start gap-3">
                   <div className="text-blue-400 text-xl">i</div>
                   <div>
-                    <h3 className="text-lg font-semibold text-white mb-2">Always-fresh prices</h3>
+                    <h3 className="text-lg font-semibold text-white mb-2">Free reads, but verify the age</h3>
                     <p className="text-dark-400 text-sm mb-3">
-                      <code className="text-primary">price-oracle.near</code> receives proactive price updates every 30-60 seconds from TEE workers.
-                      View methods like <code className="text-primary">get_price_data</code> always return fresh data — no paid call needed.
+                      <code className="text-primary">price-oracle.near</code> is written to by TEE workers on a
+                      slow, gas-paying cycle, so <code className="text-primary">get_price_data</code> costs you
+                      nothing but carries no promise of freshness. Compare the timestamp it returns against your
+                      own bound and fail closed if it is too old.
                     </p>
                     <p className="text-dark-400 text-sm">
                       You can also integrate with OutLayer directly from your own contract (see Direct OutLayer Integration section above).
@@ -1031,8 +1044,10 @@ or go direct for full customization.`}
                 <div className="flex items-start gap-3">
                   <div className="text-blue-400 text-lg">i</div>
                   <p className="text-dark-400 text-sm">
-                    Prices are proactively pushed every 30-60 seconds. <code className="text-primary">get_price_data</code> always returns fresh data.
-                    You can also call <code className="text-primary">request_price_data</code> for an immediate on-demand update.
+                    On-chain state is written on a slow cycle, so <code className="text-primary">get_price_data</code>{' '}
+                    is free but may be stale — check its timestamp. Call{' '}
+                    <code className="text-primary">request_price_data</code> when you need a price fetched for
+                    that specific call.
                   </p>
                 </div>
               </div>

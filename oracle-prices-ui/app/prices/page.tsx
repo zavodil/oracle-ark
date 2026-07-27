@@ -20,6 +20,10 @@ const REFRESH_INTERVAL_SEC = 30;
 interface PriceSource {
   name: string;
   price: number;
+  // When this venue was observed. Sources are refreshed in tiers at different cadences, so
+  // entries in the same record legitimately differ in age — Pyth and Chainlink run on a slower
+  // cycle than the all-ticker endpoints. Absent only on records written before tiered refresh.
+  timestamp?: number;
 }
 
 interface PriceData {
@@ -65,6 +69,26 @@ function formatAge(ts: number | undefined): string {
 
 function isFresh(ts: number | undefined): boolean {
   return getAgeSeconds(ts) <= RECENCY_DURATION_SEC;
+}
+
+// Compact per-source age: these appear once per venue, so "12s" reads better than "12s ago"
+function formatShortAge(ts: number | undefined): string {
+  const age = getAgeSeconds(ts);
+  if (age === Infinity) return '—';
+  if (age < 60) return `${age}s`;
+  if (age < 3600) return `${Math.floor(age / 60)}m ${age % 60}s`;
+  return `${Math.floor(age / 3600)}h`;
+}
+
+// The freshest source in a record is what a caller with a tight window actually gets, and the
+// oldest is the honest bound of the full-window aggregate. Showing both makes the tiering
+// visible instead of leaving a two-minute-old Chainlink entry looking like a stale feed.
+function sourceAgeRange(sources: PriceSource[] | undefined): { min: number; max: number } | null {
+  const ages = (sources ?? [])
+    .map((s) => getAgeSeconds(s.timestamp))
+    .filter((a) => Number.isFinite(a));
+  if (ages.length === 0) return null;
+  return { min: Math.min(...ages), max: Math.max(...ages) };
 }
 
 function PriceCard({
@@ -159,21 +183,48 @@ function PriceCard({
         </div>
       </div>
 
-      {/* Sources list */}
+      {/* Sources — collapsed by default, the breakdown is detail most visitors do not want */}
       {data && data.sources && data.sources.length > 0 && (
-        <div className="mt-4 pt-4 border-t border-dark-700">
-          <div className="text-xs text-dark-500 uppercase mb-2">Price Sources</div>
-          <div className="space-y-1">
+        <details className="mt-4 pt-4 border-t border-dark-700 group">
+          <summary className="flex justify-between items-baseline cursor-pointer list-none select-none">
+            <span className="text-xs text-dark-500 uppercase group-hover:text-dark-400">
+              Price Sources
+              <span className="ml-1 inline-block transition-transform group-open:rotate-90">›</span>
+            </span>
+            {(() => {
+              const range = sourceAgeRange(data.sources);
+              if (!range) return null;
+              return (
+                <span
+                  className="text-xs text-dark-500 font-mono"
+                  title="Freshest and oldest source behind this price"
+                >
+                  {range.min}s – {range.max}s old
+                </span>
+              );
+            })()}
+          </summary>
+          <div className="space-y-1 mt-2">
             {data.sources.map((source, idx) => (
-              <div key={idx} className="flex justify-between text-sm">
-                <span className="text-dark-400">{source.name}</span>
-                <span className="text-dark-300 font-mono">
-                  ${source.price.toFixed(4)}
+              <div key={idx} className="flex justify-between items-baseline text-sm gap-2">
+                <span className="text-dark-400 truncate">{source.name}</span>
+                <span className="flex items-baseline gap-2 shrink-0">
+                  <span
+                    className="font-mono text-xs text-green-400/70"
+                    title={
+                      source.timestamp
+                        ? new Date(source.timestamp * 1000).toLocaleTimeString()
+                        : 'no timestamp recorded'
+                    }
+                  >
+                    {formatShortAge(source.timestamp)}
+                  </span>
+                  <span className="text-dark-300 font-mono">${source.price.toFixed(4)}</span>
                 </span>
               </div>
             ))}
           </div>
-        </div>
+        </details>
       )}
 
       {/* Error message */}

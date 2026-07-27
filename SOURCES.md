@@ -111,6 +111,29 @@ upstream time that the parsers carry but the aggregator does not act on. See
 [the platform freshness docs](https://outlayer.fastnear.com/docs/tee-attestation#data-freshness)
 for how consumers should reason about age.
 
+## Refresh tiers
+
+Sources are not all refreshed together. Each stored price keeps the **per-source observation
+time**, and a refresh merges into that record rather than replacing it, so venues can run at
+different cadences:
+
+| Tier | Venues | Cadence |
+|------|--------|---------|
+| fast | everything except the slow tier | ~13-15s, priority assets |
+| full | everything except the slow tier | 60s, every asset |
+| slow | `pyth`, `chainlink` | 90s, every asset |
+
+The split exists because cost per refresh is wildly uneven: the exchange endpoints answer for
+the whole asset set in one request, while Chainlink is an EVM `eth_call` through Multicall3 and
+Pyth a separate API. Paying for those every cycle is what made a sub-20-second cadence
+unaffordable.
+
+Consumers pick their own window with `max_age_secs`, which filters **sources**: a request for 40
+seconds is answered from the venues seen within 40 seconds — the slow tier does not participate —
+and the returned `publish_time` is the oldest source that did. Widening the window lets the slow
+tier back in and moves `publish_time` accordingly. A source that stops answering keeps its last
+observation for 15 minutes and then drops out of the record entirely.
+
 ## Custom data sources
 
 Arbitrary HTTP endpoints are **not** part of `ExchangeConfig`. They are fetched through

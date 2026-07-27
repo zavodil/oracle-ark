@@ -94,16 +94,20 @@ How the scheduler keeps prices warm in TEE:
 ┌─────────────────┐     monitors      ┌──────────────────────┐
 │    Scheduler    │ ───────────────>  │   TEE Public Storage │
 │    (external)   │                   │   - price:wrap.near  │
-└────────┬────────┘                   │   - price:aurora     │
+└────────┬────────┘                   │   - price:eth.bridge │
          │                            │   - price:nbtc...    │
-         │ if stale or deviation      └──────────────────────┘
-         ↓
-┌─────────────────┐                   ┌──────────────────────┐
-│    OutLayer     │   execute WASI    │     TEE Worker       │
-│   Coordinator   │ ───────────────>  │     (Intel TDX)      │
-└─────────────────┘                   │                      │
-                                      │  Fetches from 9+     │
-                                      │  sources in parallel │
+         │ if stale or deviation      │  each with per-source│
+         ↓                            │  observation times   │
+┌─────────────────┐                   └──────────────────────┘
+│    OutLayer     │   execute WASI    ┌──────────────────────┐
+│   Coordinator   │ ───────────────>  │     TEE Worker       │
+└─────────────────┘                   │     (Intel TDX)      │
+                                      │                      │
+                                      │  Fetches the tier's  │
+                                      │  venues, 1 req each  │
+                                      │  ↓                   │
+                                      │  MERGES into the     │
+                                      │  stored record       │
                                       │  ↓                   │
                                       │  Aggregates (median) │
                                       │  ↓                   │
@@ -112,6 +116,12 @@ How the scheduler keeps prices warm in TEE:
                                       │  Can update contract │
                                       └──────────────────────┘
 ```
+
+Sources run in tiers: the cheap all-ticker venues refresh every ~13-15s for priority assets and
+every 60s for the rest, while Pyth and Chainlink — an EVM `eth_call` and a separate API — run on
+a 120s cycle. Because a refresh merges rather than replaces, all of them accumulate into one
+record and every consumer picks how far back it is willing to look. See
+[SOURCES.md](SOURCES.md#refresh-tiers).
 
 ---
 

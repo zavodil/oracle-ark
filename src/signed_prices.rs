@@ -239,16 +239,62 @@ pub fn encode_signature(signature: &[u8; 64]) -> String {
     base64::engine::general_purpose::STANDARD.encode(signature)
 }
 
+/// Resolve a tier selection (`only_sources` / `exclude_sources`) into the exclusion list that
+/// `filter_exchange_config` consumes.
+///
+/// "Refresh only Pyth and Chainlink" is expressed as "exclude everything else" on purpose:
+/// there is then a single place that maps a source name onto an `ExchangeConfig` field, so a
+/// venue added to one list and forgotten in the other cannot silently keep feeding a refresh
+/// that was supposed to skip it. Both lists are validated against `KNOWN_SOURCES` first.
+///
+/// Giving both narrows twice: the effective set is `only_sources` minus `exclude_sources`.
+pub fn resolve_source_selection(
+    only: Option<&[String]>,
+    exclude: Option<&[String]>,
+) -> Result<Vec<String>, String> {
+    let only = match only {
+        Some(list) => Some(validate_selection(list, "only_sources")?),
+        None => None,
+    };
+    let exclude = match exclude {
+        Some(list) => validate_exclusions(list)?,
+        None => Vec::new(),
+    };
+
+    let mut cleared: Vec<String> = Vec::new();
+    for source in KNOWN_SOURCES {
+        let allowed = only
+            .as_ref()
+            .map(|list| list.iter().any(|s| s == source))
+            .unwrap_or(true)
+            && !exclude.iter().any(|s| s == source);
+        if !allowed {
+            cleared.push(source.to_string());
+        }
+    }
+    Ok(cleared)
+}
+
 /// Validate and normalize `exclude_sources`.
 /// Unknown names are rejected: silently ignoring a typo would leave a source the caller
 /// believes is excluded still contributing to the signed price.
 pub fn validate_exclusions(exclude: &[String]) -> Result<Vec<String>, String> {
-    let mut normalized: Vec<String> = Vec::with_capacity(exclude.len());
-    for source in exclude {
+    validate_selection(exclude, "exclude_sources")
+}
+
+/// Validate and normalize a list of source names coming from a request.
+///
+/// The error names the offending field, because the same rejection reaching a caller as
+/// "unknown source" without saying which list it was in is the kind of message that costs an
+/// integration an afternoon.
+pub fn validate_selection(sources: &[String], field: &str) -> Result<Vec<String>, String> {
+    let mut normalized: Vec<String> = Vec::with_capacity(sources.len());
+    for source in sources {
         let name = source.trim().to_ascii_lowercase();
         if !KNOWN_SOURCES.contains(&name.as_str()) {
             return Err(format!(
-                "Unknown source in exclude_sources: '{}' (known: {})",
+                "Unknown source in {}: '{}' (known: {})",
+                field,
                 source,
                 KNOWN_SOURCES.join(", ")
             ));
@@ -269,86 +315,12 @@ pub fn is_excluded(source_name: &str, exclude: &[String]) -> bool {
 /// `fetch_all_sources` picks sources purely by which fields are `Some`, so clearing a
 /// field removes that source from the fetch. Names are validated by `validate_exclusions`.
 pub fn filter_exchange_config(config: &ExchangeConfig, exclude: &[String]) -> ExchangeConfig {
-    let mut filtered = config.clone();
-    for source in exclude {
-        match source.to_ascii_lowercase().as_str() {
-            "coingecko" => filtered.coingecko = None,
-            "binance" => filtered.binance = None,
-            "binance_us" => filtered.binance_us = None,
-            "binance_alpha" => filtered.binance_alpha = None,
-            "pyth" => filtered.pyth = None,
-            "chainlink" => filtered.chainlink = None,
-            "huobi" => filtered.huobi = None,
-            "kucoin" => filtered.kucoin = None,
-            "gate" => filtered.gate = None,
-            "cryptocom" => filtered.cryptocom = None,
-            "kraken" => filtered.kraken = None,
-            "coinbase" => filtered.coinbase = None,
-            "bitstamp" => filtered.bitstamp = None,
-            "okx" => filtered.okx = None,
-            "bitget" => filtered.bitget = None,
-            "mexc" => filtered.mexc = None,
-            // A source missing from the arms above would be silently NOT excluded: the
-            // caller believes it was filtered out while it still feeds the signed price.
-            // `every_source_is_filterable` exists to keep this arm unreachable.
-            _ => {}
-        }
-    }
-    filtered
+    config.without_sources(exclude)
 }
 
 /// List the sources a config still has configured (used for actionable error messages)
 pub fn configured_sources(config: &ExchangeConfig) -> Vec<&'static str> {
-    let mut sources = Vec::new();
-    if config.coingecko.is_some() {
-        sources.push("coingecko");
-    }
-    if config.binance.is_some() {
-        sources.push("binance");
-    }
-    if config.binance_us.is_some() {
-        sources.push("binance_us");
-    }
-    if config.binance_alpha.is_some() {
-        sources.push("binance_alpha");
-    }
-    if config.pyth.is_some() {
-        sources.push("pyth");
-    }
-    if config.chainlink.is_some() {
-        sources.push("chainlink");
-    }
-    if config.huobi.is_some() {
-        sources.push("huobi");
-    }
-    if config.kucoin.is_some() {
-        sources.push("kucoin");
-    }
-    if config.gate.is_some() {
-        sources.push("gate");
-    }
-    if config.cryptocom.is_some() {
-        sources.push("cryptocom");
-    }
-    if config.kraken.is_some() {
-        sources.push("kraken");
-    }
-    if config.coinbase.is_some() {
-        sources.push("coinbase");
-    }
-    if config.bitstamp.is_some() {
-        sources.push("bitstamp");
-    }
-    if config.okx.is_some() {
-        sources.push("okx");
-    }
-    if config.bitget.is_some() {
-        sources.push("bitget");
-    }
-    if config.mexc.is_some() {
-        sources.push("mexc");
-    }
-    sources
+    config.configured_sources()
 }
 
 /// Set every source field of an `ExchangeConfig` to `Some`, so a test can assert that a
@@ -711,5 +683,51 @@ mod tests {
         assert_eq!(SigFormat::parse(Some("json")).unwrap(), SigFormat::Json);
         assert_eq!(SigFormat::parse(Some("borsh")).unwrap(), SigFormat::Borsh);
         assert!(SigFormat::parse(Some("protobuf")).is_err());
+    }
+
+    /// A tier selection is expressed as an exclusion list so it runs through the one exhaustive
+    /// mapping of names onto config fields. These are the two tiers the scheduler actually
+    /// drives, asserted end to end: what survives the filter is what gets fetched.
+    #[test]
+    fn tier_selection_resolves_to_the_intended_venues() {
+        let all = all_sources_configured();
+
+        // slow tier: only Pyth and Chainlink
+        let cleared = resolve_source_selection(
+            Some(&["pyth".to_string(), "chainlink".to_string()]),
+            None,
+        )
+        .unwrap();
+        let mut left = configured_sources(&filter_exchange_config(&all, &cleared));
+        left.sort_unstable();
+        assert_eq!(left, vec!["chainlink", "pyth"]);
+
+        // fast tier: everything except them
+        let cleared = resolve_source_selection(
+            None,
+            Some(&["pyth".to_string(), "chainlink".to_string()]),
+        )
+        .unwrap();
+        let left = configured_sources(&filter_exchange_config(&all, &cleared));
+        assert_eq!(left.len(), KNOWN_SOURCES.len() - 2);
+        assert!(!left.contains(&"pyth") && !left.contains(&"chainlink"));
+
+        // no selection at all clears nothing — the full refresh keeps its old behaviour
+        assert!(resolve_source_selection(None, None).unwrap().is_empty());
+
+        // both lists narrow twice
+        let cleared = resolve_source_selection(
+            Some(&["pyth".to_string(), "chainlink".to_string()]),
+            Some(&["pyth".to_string()]),
+        )
+        .unwrap();
+        let left = configured_sources(&filter_exchange_config(&all, &cleared));
+        assert_eq!(left, vec!["chainlink"]);
+
+        // and a typo is rejected rather than silently widening the tier
+        let err = resolve_source_selection(Some(&["pyht".to_string()]), None).unwrap_err();
+        assert!(err.contains("only_sources"), "{}", err);
+        let err = resolve_source_selection(None, Some(&["pyht".to_string()])).unwrap_err();
+        assert!(err.contains("exclude_sources"), "{}", err);
     }
 }

@@ -503,7 +503,7 @@ Result: No human holds the signing key. Only verified TEE code can push prices.`
                     <tr className="border-b border-dark-800">
                       <td className="py-2 px-3"><code className="text-primary">max_age_secs</code></td>
                       <td className="py-2 px-3">120</td>
-                      <td className="py-2 px-3">Reject (not just report) anything older. The whole request fails rather than returning a stale entry</td>
+                      <td className="py-2 px-3">Your freshness window. It filters <strong>sources</strong>: the price is aggregated over exactly the venues observed within it, and <code>publish_time</code> is the oldest of them — so it is never larger than what you asked for. If too few venues qualify, we fetch fresh rather than serve a thinner set; if an asset still cannot be priced inside the window, the whole request fails instead of returning a stale entry</td>
                     </tr>
                     <tr className="border-b border-dark-800">
                       <td className="py-2 px-3"><code className="text-primary">exclude_sources</code></td>
@@ -519,6 +519,11 @@ Result: No human holds the signing key. Only verified TEE code can push prices.`
                       <td className="py-2 px-3"><code className="text-primary">expo</code></td>
                       <td className="py-2 px-3">-8</td>
                       <td className="py-2 px-3">Price is an integer scaled by 10<sup>expo</sup></td>
+                    </tr>
+                    <tr className="border-b border-dark-800">
+                      <td className="py-2 px-3"><code className="text-primary">min_sources_num</code></td>
+                      <td className="py-2 px-3">1</td>
+                      <td className="py-2 px-3">Minimum venues that must be inside your window for an asset to be priced. The default of <code>1</code> is a floor, not a recommendation — a lending market should raise it, so a narrow window can never be answered by a single venue</td>
                     </tr>
                   </tbody>
                 </table>
@@ -710,8 +715,19 @@ repeated per entry:
                 </li>
                 <li>
                   <strong className="text-white">Poll on your own cadence.</strong> Prices are refreshed continuously,
-                  so a poll returns the cached value; set <code className="text-primary">max_age_secs</code> at or above
-                  the refresh interval so a normal poll never forces an outbound fetch.
+                  so a poll returns the cached value. Ask for the window you actually need —{' '}
+                  <code className="text-primary">max_age_secs: 40</code> means &quot;built only from venues seen in the
+                  last 40 seconds&quot;. Narrowing it below our refresh cadence is allowed and simply makes the call
+                  fetch fresh, which costs a few seconds of latency; widening it lets the slower venues (Pyth,
+                  Chainlink, which run on a 2-minute cycle) contribute as well.
+                  <br />
+                  <span className="text-dark-400">
+                    There is a practical floor: a fresh fetch takes several seconds, and the prices it produces are
+                    already that old when the request is answered. A window at or below roughly 15 seconds will
+                    therefore fail whenever the cache cannot serve it. Priority assets (NEAR, BTC, ETH) are kept
+                    inside ~15 seconds, so <code className="text-primary">max_age_secs: 20</code> is normally
+                    answered from cache and never has to fetch.
+                  </span>
                 </li>
                 <li>
                   <strong className="text-white">Verify first, parse second</strong> — over the raw payload bytes.

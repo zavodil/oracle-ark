@@ -26,6 +26,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Ok(command) => match command {
             OracleCommand::UpdatePrices {
                 tokens,
+                only_sources,
+                exclude_sources,
                 update_contract,
                 contract_id,
                 aggregation_method,
@@ -34,6 +36,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             } => {
                 let response = handle_update_prices(
                     &tokens,
+                    only_sources.as_deref(),
+                    exclude_sources.as_deref(),
                     update_contract,
                     contract_id.as_deref(),
                     aggregation_method,
@@ -180,8 +184,11 @@ fn handle_sync_asset_configs(
 
 /// Handle update_prices command (triggered by scheduler)
 /// Fetches prices from sources IN TEE and stores in public storage
+#[allow(clippy::too_many_arguments)]
 fn handle_update_prices(
     tokens: &[String],
+    only_sources: Option<&[String]>,
+    exclude_sources: Option<&[String]>,
     update_contract: bool,
     contract_id: Option<&str>,
     aggregation_method: AggregationMethod,
@@ -202,16 +209,46 @@ fn handle_update_prices(
         }
     };
 
+    // Which venues this refresh covers. Rejecting an unknown name here rather than ignoring it
+    // matters: a typo in the slow tier's list would otherwise make that tier fetch everything
+    // on the fast tier's cadence, quietly multiplying cost and rate-limit pressure.
+    let cleared = match signed_prices::resolve_source_selection(only_sources, exclude_sources) {
+        Ok(c) => c,
+        Err(e) => {
+            return CommandResponse {
+                success: false,
+                prices: vec![],
+                error: Some(e),
+            };
+        }
+    };
+    let tiered = !cleared.is_empty();
+
     // Get universal API key from environment (used for CoinGecko, etc.)
     let api_key = env::var("API_KEY").ok();
 
-    // ONE request per distinct source for the whole token set — at most 10 — instead of the
+    // ONE request per distinct source for the whole token set — at most 16 — instead of the
     // ~66 (token, source) round-trips this used to issue. Storage still happens per token
     // below, so a failure part-way through leaves the tokens handled before it updated.
-    let batched = shared_sources::fetch_all_sources_batch(
-        &configs_for(tokens.iter().map(String::as_str), &configs),
-        api_key.as_deref(),
-    );
+    let selected: HashMap<String, ExchangeConfig> =
+        configs_for(tokens.iter().map(String::as_str), &configs)
+            .into_iter()
+            .map(|(token, config)| {
+                let config = if tiered {
+                    signed_prices::filter_exchange_config(&config, &cleared)
+                } else {
+                    config
+                };
+                (token, config)
+            })
+            // Only in a tiered refresh: an asset with no venue in THIS tier is skipped and
+            // reported as such below. In a full refresh an asset with no venues at all is a
+            // config error, and must keep falling through to the "No Price Sources" alert
+            // rather than being quietly reclassified as a tier mismatch.
+            .filter(|(_, config)| !tiered || !config.configured_sources().is_empty())
+            .collect();
+
+    let batched = shared_sources::fetch_all_sources_batch(&selected, api_key.as_deref());
 
     for token in tokens {
         let token = token.to_string();
@@ -223,6 +260,24 @@ fn handle_update_prices(
                 sources: None,
                 from_cache: None,
                 error: Some("Token not in exchange config".to_string()),
+            });
+            continue;
+        }
+
+        // A tier the asset has no venue in is a caller mistake, not a silent no-op: the
+        // scheduler is expected to send only the assets that participate in the tier, so
+        // reaching this means its view of the configs has drifted from ours.
+        if tiered && !selected.contains_key(&token) {
+            results.push(PriceResult {
+                token,
+                price: None,
+                timestamp: None,
+                sources: None,
+                from_cache: None,
+                error: Some(format!(
+                    "No configured source in the requested tier (excluded: {})",
+                    cleared.join(", ")
+                )),
             });
             continue;
         }
@@ -457,6 +512,55 @@ enum CacheFallback {
     Corrupt(String),
 }
 
+/// A price rebuilt from a stored record for one caller's freshness window.
+struct WindowedPrice {
+    price: f64,
+    /// Oldest observation that contributed. This is what the caller may rely on: an aggregate is
+    /// no fresher than its stalest input, so this — not the record's write time — is the number
+    /// that goes out as `publish_time` and gets signed.
+    timestamp: u64,
+    sources: Vec<String>,
+}
+
+/// Rebuild a price from the stored per-source breakdown, for a given window and exclusion list.
+///
+/// This is what makes "give me prices no older than 40 seconds" mean something precise: the
+/// answer is aggregated over exactly the venues observed within 40 seconds, and a slow tier that
+/// last reported two minutes ago simply does not vote. Nothing is fetched here.
+///
+/// `None` means too few sources survived the filter. Callers turn that into a refetch rather
+/// than an error — the record is a cache, not the last word.
+fn windowed_price(
+    stored: &StoredPrice,
+    now: u64,
+    max_age_secs: u64,
+    exclude: &[String],
+    aggregation_method: AggregationMethod,
+    min_sources_num: u8,
+) -> Option<WindowedPrice> {
+    let kept: Vec<&SourceInfo> = stored
+        .sources_within(now, max_age_secs)
+        .into_iter()
+        .filter(|s| !signed_prices::is_excluded(&s.name, exclude))
+        .collect();
+
+    if kept.is_empty() || kept.len() < min_sources_num as usize {
+        return None;
+    }
+
+    let prices: Vec<f64> = kept.iter().map(|s| s.price).collect();
+    // A kept set that aggregates to nothing usable is a failure for this asset, never a zero
+    // price: fall through to a refetch instead of serving it.
+    let price = signed_prices::aggregate(&prices, aggregation_method)?;
+    let timestamp = stored.oldest_timestamp(&kept)?;
+
+    Some(WindowedPrice {
+        price,
+        timestamp,
+        sources: kept.iter().map(|s| s.name.clone()).collect(),
+    })
+}
+
 /// Handle get_prices command (blockchain requests)
 /// Returns cached prices if fresh, otherwise fetches new ones
 fn handle_get_prices(
@@ -502,22 +606,32 @@ fn handle_get_prices(
         let key = StoredPrice::storage_key(&token);
         match storage::get_worker(&key) {
             Ok(Some(data)) => match serde_json::from_slice::<StoredPrice>(&data) {
-                Ok(stored) if stored.is_fresh(now, max_age_secs) => {
-                    // Return cached price
-                    states.push(CacheState::Resolved(PriceResult {
+                Ok(stored) => match windowed_price(
+                    &stored,
+                    now,
+                    max_age_secs,
+                    &[],
+                    aggregation_method,
+                    min_sources_num,
+                ) {
+                    // Enough sources inside the caller's window — serve without fetching.
+                    // Re-aggregating rather than returning `stored.price` also means the
+                    // requested aggregation_method is honoured on a cache hit, which serving
+                    // the stored scalar silently ignored.
+                    Some(view) => states.push(CacheState::Resolved(PriceResult {
                         token,
-                        price: Some(stored.price),
-                        timestamp: Some(stored.timestamp),
-                        sources: Some(stored.sources.iter().map(|s| s.name.clone()).collect()),
+                        price: Some(view.price),
+                        timestamp: Some(view.timestamp),
+                        sources: Some(view.sources),
                         from_cache: Some(true),
                         error: None,
-                    }));
-                }
-                // Cached price is stale, fetch fresh
-                Ok(stored) => states.push(CacheState::Miss {
-                    token,
-                    fallback: CacheFallback::Stale(stored),
-                }),
+                    })),
+                    // Too few sources are recent enough for this caller — fetch fresh
+                    None => states.push(CacheState::Miss {
+                        token,
+                        fallback: CacheFallback::Stale(stored),
+                    }),
+                },
                 // Corrupted cache, fetch fresh
                 Err(e) => states.push(CacheState::Miss {
                     token,
@@ -605,14 +719,24 @@ fn handle_get_prices(
                     error: Some(format!("No cache and fetch failed: {}", e)),
                 },
                 // Return stale price with warning
-                CacheFallback::Stale(stored) => PriceResult {
-                    token,
-                    price: Some(stored.price),
-                    timestamp: Some(stored.timestamp),
-                    sources: Some(stored.sources.iter().map(|s| s.name.clone()).collect()),
-                    from_cache: Some(true),
-                    error: Some(format!("Using stale cache, fetch failed: {}", e)),
-                },
+                CacheFallback::Stale(stored) => {
+                    // Report the honest age: the OLDEST source behind this record, not the time
+                    // the record was written. Under tiered refresh those differ by minutes — a
+                    // record touched 5s ago by the fast tier still carries Pyth and Chainlink
+                    // readings from far earlier. Reporting the write time here would let a stale
+                    // fallback slip through a caller's `max_age_secs` gate and be signed as
+                    // something far fresher than it is. Erring old can only cause a rejection.
+                    let all: Vec<&SourceInfo> = stored.sources.iter().collect();
+                    let observed = stored.oldest_timestamp(&all).unwrap_or(stored.timestamp);
+                    PriceResult {
+                        token,
+                        price: Some(stored.price),
+                        timestamp: Some(observed),
+                        sources: Some(stored.sources.iter().map(|s| s.name.clone()).collect()),
+                        from_cache: Some(true),
+                        error: Some(format!("Using stale cache, fetch failed: {}", e)),
+                    }
+                }
                 CacheFallback::Corrupt(parse_error) => PriceResult {
                     token,
                     price: None,
@@ -865,41 +989,25 @@ fn collect_prices_excluding_sources(
             }
         };
 
+        // Same windowed rebuild as the plain path, with the caller's exclusions applied on top
         if let Some(stored) = cached {
-            if stored.is_fresh(now, max_age_secs) {
-                let kept: Vec<&SourceInfo> = stored
-                    .sources
-                    .iter()
-                    .filter(|s| !signed_prices::is_excluded(&s.name, exclude))
-                    .collect();
-
-                if !kept.is_empty() && kept.len() >= min_sources_num as usize {
-                    let prices: Vec<f64> = kept.iter().map(|s| s.price).collect();
-                    // A cache entry whose kept sources aggregate to nothing usable is a
-                    // failure for this asset, not a zero price to be signed
-                    results.push(match signed_prices::aggregate(&prices, aggregation_method) {
-                        Some(price) => PriceResult {
-                            token,
-                            price: Some(price),
-                            timestamp: Some(stored.timestamp),
-                            sources: Some(kept.iter().map(|s| s.name.clone()).collect()),
-                            from_cache: Some(true),
-                            error: None,
-                        },
-                        None => PriceResult {
-                            token,
-                            price: None,
-                            timestamp: None,
-                            sources: None,
-                            from_cache: None,
-                            error: Some(format!(
-                                "No usable cached price: {} source(s) kept, none finite",
-                                kept.len()
-                            )),
-                        },
-                    });
-                    continue;
-                }
+            if let Some(view) = windowed_price(
+                &stored,
+                now,
+                max_age_secs,
+                exclude,
+                aggregation_method,
+                min_sources_num,
+            ) {
+                results.push(PriceResult {
+                    token,
+                    price: Some(view.price),
+                    timestamp: Some(view.timestamp),
+                    sources: Some(view.sources),
+                    from_cache: Some(true),
+                    error: None,
+                });
+                continue;
             }
         }
 
@@ -1154,6 +1262,12 @@ where
 /// Split out of `fetch_and_store_price` so the batched path reuses the exact same minimum
 /// source count, deviation alerting, aggregation and storage behaviour — only the fetch
 /// differs between the two.
+///
+/// `source_prices` is whatever *this* refresh observed, which under tiered refresh is usually a
+/// subset of the configured venues. It is merged into the previous record rather than replacing
+/// it, so a fast tier that skips Pyth and Chainlink does not erase them. The stored headline
+/// price is then aggregated over the merged sources inside `CANONICAL_WINDOW_SECS` — never over
+/// the raw merge, or a venue that died ten minutes ago would keep voting.
 fn aggregate_and_store_price(
     token: &str,
     source_prices: &[SourcePrice],
@@ -1169,25 +1283,72 @@ fn aggregate_and_store_price(
         return Err(format!("No sources available for token: {}", token));
     }
 
+    let timestamp = current_timestamp();
+
+    let fresh: Vec<SourceInfo> = source_prices
+        .iter()
+        .map(|p| SourceInfo {
+            name: p.source_name.clone(),
+            price: p.price,
+            timestamp: Some(p.timestamp),
+        })
+        .collect();
+
+    // Carry over the venues this refresh did not cover. A storage read failure is not fatal:
+    // the fresh observations alone are still a valid, if narrower, record.
+    let key = StoredPrice::storage_key(token);
+    let previous = match storage::get_worker(&key) {
+        Ok(Some(data)) => serde_json::from_slice::<StoredPrice>(&data).ok(),
+        _ => None,
+    };
+    let (previous_sources, previous_timestamp) = match &previous {
+        Some(stored) => (stored.sources.as_slice(), stored.timestamp),
+        None => (&[][..], timestamp),
+    };
+    let sources = storage_types::merge_source_entries(
+        previous_sources,
+        previous_timestamp,
+        &fresh,
+        timestamp,
+        SOURCE_RETENTION_SECS,
+    );
+
+    // The headline price commits to one window; anything outside it is retained for callers
+    // asking for a wider one, but does not contribute here.
+    let in_window: Vec<&SourceInfo> = sources
+        .iter()
+        .filter(|s| {
+            timestamp.saturating_sub(s.effective_timestamp(timestamp)) <= CANONICAL_WINDOW_SECS
+        })
+        .collect();
+
     // Check minimum sources requirement
-    if source_prices.len() < min_sources_num as usize {
+    if in_window.len() < min_sources_num as usize {
         return Err(format!(
             "Not enough sources: got {}, required {}",
-            source_prices.len(),
+            in_window.len(),
             min_sources_num
         ));
     }
 
     // Get all prices
-    let prices: Vec<f64> = source_prices.iter().map(|p| p.price).collect();
+    let prices: Vec<f64> = in_window.iter().map(|s| s.price).collect();
 
-    // Check price deviation between sources
+    // Check price deviation between sources — over the set that actually forms the price,
+    // so a retained but out-of-window entry cannot raise (or mask) the alert
     let deviation = parsers::price_deviation(&prices);
     if deviation > PRICE_DEVIATION_ALERT_THRESHOLD {
         // Alert: high price deviation
-        let source_details: Vec<String> = source_prices
+        let source_details: Vec<String> = in_window
             .iter()
-            .map(|p| format!("  {}: ${:.4}", p.source_name, p.price))
+            .map(|s| {
+                format!(
+                    "  {}: ${:.4} ({}s ago)",
+                    s.name,
+                    s.price,
+                    timestamp.saturating_sub(s.effective_timestamp(timestamp))
+                )
+            })
             .collect();
         telegram::send_alert(
             "High Price Deviation",
@@ -1226,22 +1387,18 @@ fn aggregate_and_store_price(
         }
     };
 
-    let timestamp = current_timestamp();
+    // `in_window` borrows `sources`, which is moved into the record below
+    drop(in_window);
+    let mut stored =
+        StoredPrice::new(aggregated_price, timestamp, sources, aggregation_method.as_str());
 
-    // Build source info
-    let sources: Vec<SourceInfo> = source_prices
-        .iter()
-        .map(|p| SourceInfo {
-            name: p.source_name.clone(),
-            price: p.price,
-            timestamp: Some(p.timestamp),
-        })
-        .collect();
-
-    let stored = StoredPrice::new(aggregated_price, timestamp, sources, aggregation_method.as_str());
+    // Carry the on-chain report marker across refreshes. It lives in the same record but is
+    // written by the push path, so rebuilding the record from scratch used to reset it to None
+    // and silently defeat the per-asset push throttle — harmless while refreshes were rarer
+    // than the throttle window, fatal once the fast tier runs every few seconds.
+    stored.last_contract_report = previous.as_ref().and_then(|p| p.last_contract_report);
 
     // Store in public storage
-    let key = StoredPrice::storage_key(token);
     let json =
         serde_json::to_vec(&stored).map_err(|e| format!("Failed to serialize: {}", e))?;
 
@@ -1398,6 +1555,92 @@ fn handle_test_telegram(custom_message: Option<&str>) -> TestTelegramResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn source(name: &str, price: f64, timestamp: u64) -> SourceInfo {
+        SourceInfo {
+            name: name.to_string(),
+            price,
+            timestamp: Some(timestamp),
+        }
+    }
+
+    /// The contract a consumer relies on: ask for 40 seconds and the answer is built from the
+    /// venues seen within 40 seconds, with a `publish_time` no older than that. The slow tier
+    /// keeps its entries in the record, but does not get to vote in a window it missed.
+    #[test]
+    fn a_windowed_price_is_built_only_from_sources_inside_the_window() {
+        let stored = StoredPrice::new(
+            0.0, // deliberately wrong: nothing may serve the stored scalar
+            1_200,
+            vec![
+                source("mexc", 100.0, 1_195),
+                source("okx", 102.0, 1_190),
+                source("pyth", 500.0, 1_100),
+                source("chainlink", 500.0, 1_090),
+            ],
+            "median",
+        );
+
+        let tight =
+            windowed_price(&stored, 1_200, 40, &[], AggregationMethod::Median, 1).unwrap();
+        assert_eq!(tight.price, 101.0);
+        assert_eq!(tight.timestamp, 1_190);
+        assert_eq!(tight.sources.len(), 2);
+        assert!(1_200 - tight.timestamp <= 40);
+
+        // widening lets the slow tier back in and drags the honest staleness bound with it
+        let wide =
+            windowed_price(&stored, 1_200, 120, &[], AggregationMethod::Median, 1).unwrap();
+        assert_eq!(wide.sources.len(), 4);
+        assert_eq!(wide.timestamp, 1_090);
+
+        // exclusions compose with the window
+        let excluded = windowed_price(
+            &stored,
+            1_200,
+            120,
+            &["pyth".to_string(), "chainlink".to_string()],
+            AggregationMethod::Median,
+            1,
+        )
+        .unwrap();
+        assert_eq!(excluded.price, 101.0);
+
+        // too few sources in the window is a refetch signal, never a served price
+        assert!(windowed_price(&stored, 1_200, 40, &[], AggregationMethod::Median, 3).is_none());
+        assert!(windowed_price(&stored, 1_200, 1, &[], AggregationMethod::Median, 1).is_none());
+    }
+
+    /// A record's write time is not its price's age. Under tiered refresh the fast tier touches
+    /// a record every few seconds while Pyth and Chainlink entries in it are minutes old, so any
+    /// path that reports `StoredPrice.timestamp` as the age of the data understates it — and the
+    /// signed feed gates on exactly that number. Erring old can only cause a rejection; erring
+    /// fresh gets a stale price signed as current.
+    #[test]
+    fn the_reported_age_is_the_oldest_source_not_the_write_time() {
+        let stored = StoredPrice::new(
+            100.0,
+            1_200, // written a moment ago by the fast tier
+            vec![
+                source("mexc", 100.0, 1_199),
+                source("chainlink", 100.0, 1_080), // 120s older
+            ],
+            "median",
+        );
+
+        let all: Vec<&SourceInfo> = stored.sources.iter().collect();
+        assert_eq!(stored.oldest_timestamp(&all), Some(1_080));
+        assert_ne!(
+            stored.oldest_timestamp(&all),
+            Some(stored.timestamp),
+            "the fallback must not inherit the record's write time"
+        );
+
+        // and the windowed path agrees: a 40s window sees only the fresh venue
+        let view = windowed_price(&stored, 1_200, 40, &[], AggregationMethod::Median, 1).unwrap();
+        assert_eq!(view.timestamp, 1_199);
+        assert_eq!(view.sources, vec!["mexc".to_string()]);
+    }
 
     /// Two commands still read an environment variable the caller names. `oracle_keys` reached
     /// `env::var` without this check, so an `update_prices` request could pick any secret in

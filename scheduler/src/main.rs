@@ -11,7 +11,6 @@ mod telegram;
 
 use anyhow::{Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
-use futures::future::join_all;
 use futures::stream::{self, StreamExt};
 use oracle_ark_sources::ExchangeConfig;
 use serde::Deserialize;
@@ -43,6 +42,18 @@ struct Config {
 
     /// Update interval for priority assets (NEAR, BTC, ETH) — default: same as update_interval
     update_interval_priority_secs: u64,
+
+    /// How often the slow tier (`slow_sources`) is refreshed, for every asset.
+    slow_source_interval_secs: u64,
+
+    /// Venues kept out of the fast and full tiers and refreshed on their own slow cadence.
+    ///
+    /// Pyth and Chainlink by default: Chainlink is an EVM `eth_call` through Multicall3 and
+    /// Pyth a separate API, so both cost far more per refresh than an all-ticker endpoint that
+    /// returns every asset in one response. Excluding them is what makes a sub-20s cadence
+    /// affordable — their last observation stays in the record and keeps contributing to any
+    /// caller whose window is wide enough to reach it.
+    slow_sources: Vec<String>,
 
     /// Poll interval in seconds when no update is needed (default: 5)
     poll_interval_secs: u64,
@@ -112,15 +123,33 @@ impl Config {
                 .unwrap_or_else(|_| "60".to_string())
                 .parse()
                 .unwrap_or(60),
+            // 0 = due on every poll. The effective cadence is then
+            // `POLL_INTERVAL_SECS + own batch fetch + the refresh call` — about 13-15s measured,
+            // which is what keeps the priority assets under a 20s ceiling. Any positive value
+            // adds directly on top of that, so 10 here means ~25s, not 10s.
+            //
+            // This used to fall back to UPDATE_INTERVAL_SECS when unset, which silently disabled
+            // the priority tier entirely: every cycle was already a full one, so the priority
+            // batch never ran.
             update_interval_priority_secs: env::var("UPDATE_INTERVAL_PRIORITY_SECS")
                 .ok()
                 .and_then(|v| v.parse().ok())
-                .unwrap_or_else(|| {
-                    env::var("UPDATE_INTERVAL_SECS")
-                        .ok()
-                        .and_then(|v| v.parse().ok())
-                        .unwrap_or(60)
-                }),
+                .unwrap_or(0),
+            // Comfortably BELOW the worker's canonical window (120s), not equal to it. The real
+            // gap is this interval plus the poll granularity plus the call itself, so 120 here
+            // would leave Pyth and Chainlink drifting past 120s old for part of every cycle —
+            // they would drop out of the published aggregate and reappear on the next refresh,
+            // moving the price without the market moving. 90 keeps them inside it at all times.
+            slow_source_interval_secs: env::var("SLOW_SOURCE_INTERVAL_SECS")
+                .unwrap_or_else(|_| "90".to_string())
+                .parse()
+                .unwrap_or(90),
+            slow_sources: env::var("SLOW_SOURCES")
+                .unwrap_or_else(|_| "pyth,chainlink".to_string())
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect(),
             poll_interval_secs: env::var("POLL_INTERVAL_SECS")
                 .unwrap_or_else(|_| "5".to_string())
                 .parse()
@@ -181,6 +210,35 @@ impl Config {
     }
 }
 
+/// Which venues a refresh covers.
+///
+/// The worker merges what a refresh fetched into the stored record, so these are not competing
+/// views of the same data — they are cadences. Splitting them is what makes a sub-20s priority
+/// refresh affordable: it stops paying for Chainlink's `eth_call` and Pyth's separate API on
+/// every cycle, while their last observation stays in the record for callers whose freshness
+/// window is wide enough to include it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Tier {
+    /// Every configured venue. Used by the on-chain push, which runs rarely and wants the
+    /// widest possible source set behind the price it reports.
+    Full,
+    /// Everything except `slow_sources` — the cheap all-ticker endpoints that answer for the
+    /// whole asset set in one request.
+    Fast,
+    /// Only `slow_sources`, for every asset.
+    Slow,
+}
+
+impl Tier {
+    fn label(self) -> &'static str {
+        match self {
+            Tier::Full => "full",
+            Tier::Fast => "fast",
+            Tier::Slow => "slow-sources",
+        }
+    }
+}
+
 /// Price stored in WASI public storage
 #[derive(Debug, Clone, Deserialize)]
 #[allow(dead_code)]
@@ -191,11 +249,34 @@ struct StoredPrice {
     aggregation_method: String,
 }
 
+impl StoredPrice {
+    /// Median of the stored breakdown over the venues this scheduler also fetched.
+    ///
+    /// The comparison below has to be like-for-like. `price` is aggregated over every venue
+    /// including the slow tier, while the scheduler fetches only the cheap ones — comparing
+    /// those two directly would leave a standing offset on any asset where the slow tier reads
+    /// differently, and a standing offset above the threshold is a refresh trigger that never
+    /// stops firing. Recomputing from the same subset costs nothing: the breakdown is already
+    /// in the response.
+    fn price_excluding(&self, excluded: &[String]) -> Option<f64> {
+        let values: Vec<f64> = self
+            .sources
+            .iter()
+            .filter(|s| !excluded.iter().any(|e| e.eq_ignore_ascii_case(&s.name)))
+            .map(|s| s.price)
+            .collect();
+        oracle_ark_sources::parsers::median(&values)
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[allow(dead_code)]
 struct SourceInfo {
     name: String,
     price: f64,
+    /// When this venue was observed. Absent on records written before tiered refresh.
+    #[serde(default)]
+    timestamp: Option<u64>,
 }
 
 /// Response item from batch storage API
@@ -247,13 +328,18 @@ async fn main() -> Result<()> {
     info!("Project: {}/{}", config.project_owner, config.project_name);
     info!("Exchange configs: loaded from public storage (config:assets)");
     info!(
-        "Update intervals: priority={}s, full={}s, poll={}s, threshold={}%",
+        "Update intervals: priority={}s, full={}s, slow-sources={}s, poll={}s, threshold={}%",
         config.update_interval_priority_secs,
         config.update_interval_secs,
+        config.slow_source_interval_secs,
         config.poll_interval_secs,
         config.price_diff_threshold_percent
     );
     info!("Priority assets: {:?}", config.priority_assets);
+    info!(
+        "Slow-tier sources (refreshed every {}s, excluded from the fast and full tiers): {:?}",
+        config.slow_source_interval_secs, config.slow_sources
+    );
     info!("Update contract: {}", config.update_contract_enabled);
     if let Some(ref contract_id) = config.oracle_contract_id {
         info!("Contract asset source: {} (via {})", contract_id, config.near_rpc_url);
@@ -263,9 +349,10 @@ async fn main() -> Result<()> {
         if config.telegram_bot_token.is_some() { "enabled" } else { "disabled" }
     );
 
-    // Global batch timers (full update vs priority-only)
+    // Global batch timers (full update vs priority-only vs slow-source tier)
     let mut last_priority_update: Option<Instant> = None;
     let mut last_full_update: Option<Instant> = None;
+    let mut last_slow_update: Option<Instant> = None;
     // Separate, much slower timer for the on-chain push — it costs gas, so it must not follow the
     // cache-refresh cadence.
     let mut last_contract_push: Option<Instant> = None;
@@ -447,10 +534,9 @@ async fn main() -> Result<()> {
             }
         }
 
-        let wasi_was_called = match poll_and_update(&client, &config, &mut last_priority_update, &mut last_full_update, &mut last_contract_push, oracle_keys_cache.as_ref(), contract_update_paused, exchange_configs, &mut alert_throttle).await {
-            Ok(called) => {
+        match poll_and_update(&client, &config, &mut last_priority_update, &mut last_full_update, &mut last_slow_update, &mut last_contract_push, oracle_keys_cache.as_ref(), contract_update_paused, exchange_configs, &mut alert_throttle).await {
+            Ok(_) => {
                 consecutive_failures = 0;
-                called
             }
             Err(e) => {
                 error!("Poll cycle failed: {}", e);
@@ -470,15 +556,19 @@ async fn main() -> Result<()> {
                     )
                     .await;
                 }
-                false
             }
-        };
-
-        if !wasi_was_called || consecutive_failures > 0 {
-            // No update needed or error — wait before next check
-            tokio::time::sleep(Duration::from_secs(config.poll_interval_secs)).await;
         }
-        // If WASI was called successfully — immediately start next check cycle
+
+        // Always wait a poll interval, including after a successful refresh.
+        //
+        // This used to start the next cycle immediately whenever WASI had been called, which is
+        // unbounded by construction: the price-deviation trigger does NOT reset the scheduled
+        // timers, so a token whose scheduler-side median stays more than the threshold away from
+        // the worker's — a permanent state, not a transient one, whenever the two sides see
+        // different venues — would refresh, skip the sleep, still disagree, and refresh again,
+        // forever. Every one of those calls costs money and none of them makes prices fresher.
+        // The cadence belongs to the timers; the loop's job is only to check them.
+        tokio::time::sleep(Duration::from_secs(config.poll_interval_secs)).await;
     }
 }
 
@@ -787,11 +877,13 @@ fn balance_groups(
     groups
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn poll_and_update(
     client: &reqwest::Client,
     config: &Config,
     last_priority_update: &mut Option<Instant>,
     last_full_update: &mut Option<Instant>,
+    last_slow_update: &mut Option<Instant>,
     last_contract_push: &mut Option<Instant>,
     oracle_keys: Option<&HashMap<String, String>>,
     contract_update_paused: bool,
@@ -804,29 +896,31 @@ async fn poll_and_update(
     let all_tokens: Vec<String> = exchange_configs.keys().cloned().collect();
     let api_key = env::var("API_KEY").ok();
 
-    // 1. Fetch current prices from external sources in parallel (for comparison only!)
-    let fetch_futures: Vec<_> = all_tokens
+    // 1. Fetch current prices from external sources (for comparison only!)
+    //
+    // ONE request per venue for the whole asset set, exactly like the worker. Fetching per
+    // token instead cost 182 requests every poll for our 18 assets — against ~16 for the
+    // refresh those requests exist to guard — which kept Kraken and Bitstamp permanently
+    // rate-limited. That is worse than wasteful: the venues that drop out here but not in the
+    // worker shift this side's median, and a systematic gap between the two medians makes the
+    // deviation trigger below fire forever.
+    //
+    // The slow tier is skipped here too. Detecting that a price moved does not need Chainlink's
+    // `eth_call` or Pyth's API every few seconds — that is exactly the per-cycle cost the tier
+    // split exists to avoid, and paying it in the scheduler instead of the worker would be no
+    // saving at all. The comparison stays like-for-like via `price_excluding` below.
+    let comparison_configs: HashMap<String, ExchangeConfig> = exchange_configs
         .iter()
-        .map(|token| {
-            let config_for_token = exchange_configs[token].clone();
-            let token = token.clone();
-            let api_key = api_key.clone();
-            async move {
-                let result =
-                    sources::fetch_price(client, &token, &config_for_token, api_key.as_deref())
-                        .await;
-                (token, result)
-            }
-        })
+        .map(|(token, cfg)| (token.clone(), cfg.without_sources(&config.slow_sources)))
         .collect();
-
-    let fetch_results = join_all(fetch_futures).await;
+    let batched =
+        sources::fetch_all_sources_batch(client, &comparison_configs, api_key.as_deref()).await;
 
     let mut current_prices: HashMap<String, f64> = HashMap::new();
-    for (token, result) in fetch_results {
-        match result {
+    for token in &all_tokens {
+        match sources::aggregate_batched(token, batched.get(token).map(Vec::as_slice)) {
             Ok(price) => {
-                current_prices.insert(token, price);
+                current_prices.insert(token.clone(), price);
             }
             Err(e) => {
                 warn!("Failed to fetch {} from sources: {}", token, e);
@@ -835,25 +929,29 @@ async fn poll_and_update(
     }
 
     if current_prices.is_empty() {
-        warn!("No current prices fetched from any source");
+        // Alert, but keep going. Losing our own view only costs us the deviation trigger; the
+        // scheduled tiers must still run, and the worker fetches independently of us. Returning
+        // early here would let an outage on this VPS's egress stop the slow tier and the
+        // on-chain push as well — a scheduler that cannot see the market is not a reason to
+        // stop the enclave that can.
+        warn!("No current prices fetched from any source — deviation trigger disabled this cycle");
 
-        // Alert if we couldn't get any prices (throttled)
         alert_throttle.send(
             client,
             config.telegram_bot_token.as_deref(),
             config.telegram_chat_id.as_deref(),
             "No Prices Available",
             &format!(
-                "Project: {}/{}\nScheduler failed to fetch prices from any external source.\nCheck API connectivity.",
+                "Project: {}/{}\nScheduler failed to fetch prices from any external source.\nScheduled refreshes continue; the price-deviation trigger is off until this clears.\nCheck API connectivity.",
                 config.project_owner, config.project_name
             ),
         )
         .await;
-
-        return Ok(false);
     }
 
-    // 2. Determine scheduled batch: full update or priority-only
+    // 2. Determine scheduled batch: full update or priority-only.
+    //
+    // Both refresh the cheap venues only — Pyth and Chainlink ride the slow tier in step 4a.
     let full_due = last_full_update
         .map(|t| t.elapsed().as_secs() >= config.update_interval_secs)
         .unwrap_or(true);
@@ -861,15 +959,35 @@ async fn poll_and_update(
         .map(|t| t.elapsed().as_secs() >= config.update_interval_priority_secs)
         .unwrap_or(true);
 
+    // Assets that have at least one venue in this tier. Deliberately NOT "assets we managed to
+    // price locally this cycle": whether the worker should refresh an asset is not conditional
+    // on our own comparison fetch succeeding. Gating on it would drop a thin asset — FRAX has
+    // exactly one non-slow venue — out of the scheduled refresh the moment that venue blipped.
+    let fast_tier_tokens: Vec<String> = all_tokens
+        .iter()
+        .filter(|token| {
+            exchange_configs
+                .get(*token)
+                .map(|c| {
+                    !c.without_sources(&config.slow_sources)
+                        .configured_sources()
+                        .is_empty()
+                })
+                .unwrap_or(false)
+        })
+        .cloned()
+        .collect();
+
     let mut tokens_to_update: Vec<String> = if full_due {
-        // Full batch: all tokens that have prices
         info!("Full update due (every {}s)", config.update_interval_secs);
-        current_prices.keys().cloned().collect()
+        fast_tier_tokens.clone()
     } else if priority_due {
         // Priority batch: only priority tokens
         info!("Priority update due (every {}s)", config.update_interval_priority_secs);
-        config.priority_assets.iter()
-            .filter(|t| current_prices.contains_key(t.as_str()))
+        config
+            .priority_assets
+            .iter()
+            .filter(|t| fast_tier_tokens.contains(t))
             .cloned()
             .collect()
     } else {
@@ -884,11 +1002,21 @@ async fn poll_and_update(
         if tokens_to_update.contains(token) {
             continue;
         }
+        // Compare against the stored breakdown restricted to the venues we also fetched, not
+        // against the stored headline price — see `StoredPrice::price_excluding`
         let price_trigger = match stored_prices.get(token) {
-            Some(stored) => {
-                let diff = ((current_price - stored.price) / stored.price).abs() * 100.0;
-                diff > config.price_diff_threshold_percent
-            }
+            Some(stored) => match stored.price_excluding(&config.slow_sources) {
+                Some(comparable) if comparable != 0.0 => {
+                    let diff = ((current_price - comparable) / comparable).abs() * 100.0;
+                    debug!(
+                        "{}: current={:.6}, stored(same venues)={:.6}, diff={:.2}%",
+                        token, current_price, comparable, diff
+                    );
+                    diff > config.price_diff_threshold_percent
+                }
+                // Nothing comparable left in the record — refresh rather than guess
+                _ => true,
+            },
             None => true,
         };
         if price_trigger {
@@ -903,14 +1031,21 @@ async fn poll_and_update(
     // failing group never discards the work of the others. Never pushes on-chain (see phase 2).
     let mut cache_refreshed = false;
     if !tokens_to_update.is_empty() {
-        let batch_type = if full_due { "full" } else if priority_due { "priority" } else { "price-triggered" };
+        let batch_type = if full_due {
+            "full"
+        } else if priority_due {
+            "priority"
+        } else {
+            "price-triggered"
+        };
         let group_size = config.group_max_tokens.max(1);
         let concurrency = config.fetch_concurrency.max(1);
         let groups = balance_groups(&tokens_to_update, exchange_configs, group_size);
         info!(
-            "Refreshing {} tokens ({}) in {} group(s), {} concurrent",
+            "Refreshing {} tokens ({}, tier={}) in {} group(s), {} concurrent",
             tokens_to_update.len(),
             batch_type,
+            Tier::Fast.label(),
             groups.len(),
             concurrency
         );
@@ -919,9 +1054,16 @@ async fn poll_and_update(
             let client = client.clone();
             let config = config.clone();
             async move {
-                let res =
-                    call_wasi_update(&client, &config, &group, None, contract_update_paused, false)
-                        .await;
+                let res = call_wasi_update(
+                    &client,
+                    &config,
+                    &group,
+                    Tier::Fast,
+                    None,
+                    contract_update_paused,
+                    false,
+                )
+                .await;
                 (group, res)
             }
         }))
@@ -973,6 +1115,77 @@ async fn poll_and_update(
         }
     }
 
+    // 4a. The slow tier — Pyth and Chainlink for every asset, on its own much wider cadence.
+    //
+    // A separate call rather than a wider group, because it covers a different set of venues:
+    // the worker merges it into the same records the fast tier writes. Its failure is alerted
+    // but never fails the cycle — the cheap venues have already committed fresh prices, and a
+    // consumer asking for a tight window was not going to see Pyth or Chainlink anyway.
+    let slow_due = last_slow_update
+        .map(|t| t.elapsed().as_secs() >= config.slow_source_interval_secs)
+        .unwrap_or(true);
+    if slow_due && !config.slow_sources.is_empty() {
+        // Only the assets that actually configure one of these venues — the worker rejects a
+        // token with nothing to refresh in the requested tier rather than quietly doing nothing
+        let slow_tokens: Vec<String> = all_tokens
+            .iter()
+            .filter(|token| {
+                exchange_configs
+                    .get(*token)
+                    .map(|c| c.configures_any(&config.slow_sources))
+                    .unwrap_or(false)
+            })
+            .cloned()
+            .collect();
+
+        if slow_tokens.is_empty() {
+            debug!("Slow tier due but no asset configures {:?}", config.slow_sources);
+            *last_slow_update = Some(Instant::now());
+        } else {
+            info!(
+                "Slow-source update due (every {}s): {:?} for {} tokens",
+                config.slow_source_interval_secs,
+                config.slow_sources,
+                slow_tokens.len()
+            );
+            match call_wasi_update(
+                client,
+                config,
+                &slow_tokens,
+                Tier::Slow,
+                None,
+                contract_update_paused,
+                false,
+            )
+            .await
+            {
+                Ok(_) => {
+                    *last_slow_update = Some(Instant::now());
+                    cache_refreshed = true;
+                }
+                Err(e) => {
+                    warn!("Slow-source refresh failed: {}", e);
+                    alert_throttle
+                        .send(
+                            client,
+                            config.telegram_bot_token.as_deref(),
+                            config.telegram_chat_id.as_deref(),
+                            "Slow-Source Refresh Failed",
+                            &format!(
+                                "Project: {}/{}\nSources: {}\nTokens: {}\nError: {}",
+                                config.project_owner,
+                                config.project_name,
+                                config.slow_sources.join(", "),
+                                slow_tokens.len(),
+                                e
+                            ),
+                        )
+                        .await;
+                }
+            }
+        }
+    }
+
     // 5. Phase 2 — push prices on-chain. ONE call covering every token, on its own slow cadence.
     // Kept separate from the refresh above precisely so that parallelising the refresh cannot
     // multiply transactions: refreshing is cheap and frequent, pushing costs gas and stays rare.
@@ -982,17 +1195,24 @@ async fn poll_and_update(
             .map(|t| t.elapsed().as_secs() >= config.contract_push_interval_secs)
             .unwrap_or(true);
         if push_due {
-            let push_tokens: Vec<String> = current_prices.keys().cloned().collect();
+            // Every configured asset, not only the ones this cycle managed to price locally:
+            // the push runs Tier::Full, so the worker refetches every venue itself. Gating on
+            // our own comparison fetch would silently drop an asset whose only venues are in
+            // the slow tier, which this side deliberately does not fetch.
+            let push_tokens: Vec<String> = all_tokens.clone();
             if !push_tokens.is_empty() {
                 info!(
                     "Contract push due (every {}s): {} tokens",
                     config.contract_push_interval_secs,
                     push_tokens.len()
                 );
+                // Tier::Full: the push runs rarely and costs gas, so the price it reports
+                // on-chain should stand on every venue, not just the cheap tier
                 match call_wasi_update(
                     client,
                     config,
                     &push_tokens,
+                    Tier::Full,
                     oracle_keys,
                     contract_update_paused,
                     true,
@@ -1090,10 +1310,12 @@ async fn read_public_storage_batch(
     Ok(result)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn call_wasi_update(
     client: &reqwest::Client,
     config: &Config,
     tokens: &[String],
+    tier: Tier,
     oracle_keys: Option<&HashMap<String, String>>,
     contract_update_paused: bool,
     push_to_contract: bool,
@@ -1120,6 +1342,19 @@ async fn call_wasi_update(
         "aggregation_method": config.aggregation_method,
         "min_sources_num": config.min_sources_num,
     });
+
+    // Which venues this refresh covers. The worker merges what it fetched into the stored
+    // record, so a tier that skips Pyth and Chainlink leaves their last observation in place
+    // rather than deleting it.
+    match tier {
+        Tier::Full => {}
+        Tier::Fast => {
+            input["exclude_sources"] = serde_json::json!(config.slow_sources);
+        }
+        Tier::Slow => {
+            input["only_sources"] = serde_json::json!(config.slow_sources);
+        }
+    }
 
     // Pass oracle key mapping only when actually updating contract
     if effective_update_contract {
@@ -1321,5 +1556,65 @@ mod tests {
         let tokens = vec!["ghost".to_string()];
         let groups = balance_groups(&tokens, &configs, 4);
         assert_eq!(groups, vec![vec!["ghost".to_string()]]);
+    }
+
+    fn stored(sources: &[(&str, f64)]) -> StoredPrice {
+        StoredPrice {
+            price: 100.0,
+            timestamp: 1_000,
+            sources: sources
+                .iter()
+                .map(|(name, price)| SourceInfo {
+                    name: name.to_string(),
+                    price: *price,
+                    timestamp: Some(1_000),
+                })
+                .collect(),
+            aggregation_method: "median".to_string(),
+        }
+    }
+
+    /// The deviation trigger compares this scheduler's median against the worker's. Since the
+    /// scheduler no longer fetches the slow tier, comparing against the stored *headline* price
+    /// would leave a standing offset wherever the slow venues read differently — and a standing
+    /// offset above the threshold is a trigger that fires on every cycle, forever, without ever
+    /// making prices fresher.
+    #[test]
+    fn comparison_uses_the_same_venues_the_scheduler_fetched() {
+        let slow = vec!["pyth".to_string(), "chainlink".to_string()];
+
+        // Chainlink lags badly; the cheap venues agree with each other
+        let record = stored(&[
+            ("coingecko", 100.0),
+            ("kraken", 100.0),
+            ("mexc", 100.0),
+            ("chainlink", 130.0),
+            ("pyth", 130.0),
+        ]);
+
+        // Headline median over all five is 100.0 here, but the point is the subset is exact
+        assert_eq!(record.price_excluding(&slow), Some(100.0));
+
+        // With an even split the headline would drift while the cheap venues stay put
+        let skewed = stored(&[
+            ("coingecko", 100.0),
+            ("kraken", 101.0),
+            ("chainlink", 130.0),
+            ("pyth", 131.0),
+        ]);
+        assert_eq!(skewed.price_excluding(&slow), Some(100.5));
+        // the headline the trigger used to compare against is 15% away — a permanent trigger
+        let headline = oracle_ark_sources::parsers::median(
+            &skewed.sources.iter().map(|s| s.price).collect::<Vec<_>>(),
+        )
+        .unwrap();
+        assert!((headline - 100.5).abs() / 100.5 * 100.0 > 1.0);
+
+        // Case-insensitive, and a record left with nothing comparable says so
+        assert_eq!(
+            stored(&[("Pyth", 5.0)]).price_excluding(&slow),
+            None,
+            "no comparable venue must not silently compare against the slow tier"
+        );
     }
 }

@@ -14,14 +14,15 @@ External APIs                    Scheduler (VPS)                TEE Worker (Phal
 CoinGecko ─┐                     ┌─────────────┐               ┌──────────────────────┐
 Binance   ─┤  compare prices     │ Poll loop   │  read stored  │ Public Storage       │
 Pyth      ─┼──────────────────>  │ (every 5s)  │ <──────────── │  price:wrap.near     │
-KuCoin    ─┤                     │             │   prices      │  price:aurora        │
-Gate.io   ─┤                     │  if delta > │               │  price:nbtc...       │
-Huobi     ─┤                     │  threshold: │               │                      │
-Crypto.com─┘                     │             │  trigger      │ WASI Binary          │
-                                 │  call WASI  │ ────────────> │  fetches own prices  │
-                                 │  (no data!) │  update       │  from all 10 sources │
-                                 └─────────────┘               │  aggregates (median) │
-                                                               │  writes to storage   │
+Kraken    ─┤  (1 req per venue,  │             │   prices      │  price:eth.bridge... │
+Coinbase  ─┤   whole asset set)  │  if delta > │               │  price:nbtc...       │
+Chainlink ─┤                     │  threshold: │               │   each with per-source
+MEXC ...  ─┘                     │             │  trigger      │   observation times  │
+                                 │  call WASI  │ ────────────> │                      │
+                                 │  (no data!, │  update       │ WASI Binary          │
+                                 │   tier tag) │  (tier)       │  fetches the tier's  │
+                                 └─────────────┘               │  venues, MERGES into │
+                                                               │  the record, writes  │
                                                                └──────────────────────┘
 ```
 
@@ -30,9 +31,15 @@ Crypto.com─┘                     │             │  trigger      │ WASI 
 1. **TEE worker** (WASI binary inside Intel TDX enclave) holds fresh prices in its public storage. When any user or contract requests a price, the worker returns the cached result immediately — no external API calls at request time.
 
 2. **Scheduler** runs **outside TEE** on a separate VPS. Every 5s (configurable via `POLL_INTERVAL_SECS`) it:
-   - Fetches current prices from external sources (CoinGecko, Binance, Pyth, etc.) for comparison
+   - Fetches current prices from external sources (CoinGecko, Binance, Pyth, etc.) for comparison — **batched, one request per venue for the whole asset set**, exactly like the worker
    - Reads the TEE worker's stored prices via OutLayer public storage batch API
    - Compares the two and decides whether an update is needed
+
+   Batching this side is not only about cost. The comparison exists to notice when the
+   scheduler's view disagrees with the worker's, so any difference in *how* the two fetch
+   becomes a permanent disagreement: fetching per token cost 182 requests per poll for 18
+   assets, which kept Kraken and Bitstamp rate-limited, dropped them from this side's median
+   only, and made the deviation trigger fire on every cycle forever.
 
 3. **Triggering an update**: the scheduler sends a `call` request to the OutLayer coordinator with command `update_prices` and the list of tokens to refresh. **The scheduler does NOT send price data** — it only tells the TEE worker *which* tokens need updating. The worker then fetches prices from all configured sources independently inside the enclave, aggregates them, and writes the result to public storage.
 
@@ -49,15 +56,44 @@ Crypto.com─┘                     │             │  trigger      │ WASI 
 - **Instant responses** — any WASI call requesting prices gets pre-computed results
 - **Efficient** — only tokens with significant changes or stale data get updated
 
+## Source tiers
+
+A refresh does not have to cover every venue. The worker **merges** what a refresh fetched into
+the stored record, keeping each source's own observation time, so venues can run at different
+cadences and still aggregate into one price:
+
+| Tier | Venues | Assets | Cadence |
+|------|--------|--------|---------|
+| **Fast** | everything except `SLOW_SOURCES` | `PRIORITY_ASSETS` | `UPDATE_INTERVAL_PRIORITY_SECS` (~13-15s at `0`) |
+| **Full** | everything except `SLOW_SOURCES` | all | `UPDATE_INTERVAL_SECS` (60s) |
+| **Slow** | `SLOW_SOURCES` (`pyth,chainlink`) | all that configure them | `SLOW_SOURCE_INTERVAL_SECS` (90s) |
+| **Push** | everything | all | `CONTRACT_PUSH_INTERVAL_SECS` (300s), only when on-chain push is enabled |
+
+Why this split: the cheap venues answer for the entire asset set in one request, while Chainlink
+is an EVM `eth_call` through Multicall3 and Pyth a separate API. Paying for those on every cycle
+is what made a sub-20s cadence unaffordable. They are not dropped — their last observation stays
+in the record and keeps contributing to any consumer whose window is wide enough to include it.
+
+Consumers choose that window per request via `max_age_secs`, which filters **sources**, not
+records: `max_age_secs: 40` is answered from the venues seen within 40 seconds, and the returned
+`publish_time` is the oldest of them. If too few sources qualify, the worker fetches fresh rather
+than serving a thinner set.
+
 ## Update triggers
 
 | Trigger | Condition | Default |
 |---------|-----------|---------|
 | **Price deviation** | `abs(current - stored) / stored > threshold` | 1% |
-| **Time interval** | Time since last update exceeds interval | 60s |
+| **Time interval** | Time since last update exceeds the tier's interval | 60s full / ~13-15s priority |
 | **Missing price** | Token has no stored price yet | Always triggers |
 
 Either trigger is sufficient. If a price moves fast, it gets updated before the interval expires.
+
+The loop always waits `POLL_INTERVAL_SECS` between cycles, including after a successful refresh.
+It used to skip that wait whenever WASI had been called, which is unbounded by construction: the
+deviation trigger does not reset the scheduled timers, so a token whose two medians disagree
+persistently would refresh, skip the wait, still disagree, and refresh again — every call costing
+money and none of them making prices fresher.
 
 ## Optional: on-chain contract push
 
@@ -135,7 +171,9 @@ cargo run --release
 | `PROJECT_UUID` | required | Project UUID for public storage reads |
 | `PAYMENT_KEY` | required | Payment key (format: `owner:nonce:secret`) |
 | `UPDATE_INTERVAL_SECS` | `60` | Max staleness before refresh, full asset set (seconds) |
-| `UPDATE_INTERVAL_PRIORITY_SECS` | `10` | Max staleness before refresh for priority assets (seconds) |
+| `UPDATE_INTERVAL_PRIORITY_SECS` | `0` | Extra wait between priority refreshes. `0` = due on every poll, giving a ~13-15s effective cadence (poll interval + own fetch + the call). A positive value adds on top: `10` yields ~25s |
+| `SLOW_SOURCES` | `pyth,chainlink` | Venues excluded from the fast and full tiers and refreshed on their own slow cadence |
+| `SLOW_SOURCE_INTERVAL_SECS` | `90` | How often `SLOW_SOURCES` are refreshed. Must stay below the worker's 120s canonical window — the real gap is this plus the poll interval plus the call |
 | `POLL_INTERVAL_SECS` | `5` | How often the poll loop runs (seconds) |
 | `PRIORITY_ASSETS` | `wrap.near,nbtc.bridge.near,eth.bridge.near` | Comma-separated assets refreshed on the priority interval |
 | `PRICE_DIFF_THRESHOLD_PERCENT` | `1.0` | Price change % that triggers immediate refresh |
@@ -194,7 +232,7 @@ DEBUG aurora: current=3456.78, stored=3450.12, diff=0.19%
 POST {COORDINATOR_URL}/public/storage/batch
 {
   "project_uuid": "...",
-  "keys": ["price:wrap.near", "price:aurora", ...]
+  "keys": ["price:wrap.near", "price:eth.bridge.near", ...]
 }
 ```
 
@@ -207,15 +245,23 @@ Returns an envelope keyed by storage key; each `value` is base64-encoded JSON:
 }
 ```
 
-The decoded `value` is a `StoredPrice`:
+The decoded `value` is a `StoredPrice` (timestamps are unix **seconds**):
 ```json
 {
   "price": 5.0123,
-  "timestamp": 1706900000000000000,
-  "sources": [{"name": "binance", "price": 5.01, "timestamp": 1706900000000000000}],
+  "timestamp": 1706900000,
+  "sources": [
+    {"name": "mexc",      "price": 5.0140, "timestamp": 1706900000},
+    {"name": "chainlink", "price": 5.0090, "timestamp": 1706899890}
+  ],
   "aggregation_method": "median"
 }
 ```
+
+`timestamp` is when the record was last **written**, not the age of the price — a partial
+refresh touches the record while leaving most sources alone. Each source carries its own
+observation time, and the honest staleness bound of any aggregate is the oldest source inside
+the window it was built from.
 
 ### Triggering WASI update
 
@@ -225,7 +271,8 @@ X-Payment-Key: {PAYMENT_KEY}
 {
   "input": {
     "command": "update_prices",
-    "tokens": ["wrap.near", "aurora"],
+    "tokens": ["wrap.near", "eth.bridge.near"],
+    "exclude_sources": ["pyth", "chainlink"],
     "update_contract": false,
     "aggregation_method": "median",
     "min_sources_num": 1,
@@ -237,6 +284,13 @@ X-Payment-Key: {PAYMENT_KEY}
   "async": true
 }
 ```
+
+`exclude_sources` / `only_sources` select the tier. The fast and full tiers send
+`exclude_sources: SLOW_SOURCES`; the slow tier sends `only_sources: SLOW_SOURCES`; the on-chain
+push sends neither, so it refreshes every venue. Whatever a call fetches is merged into the
+stored record — a tier never deletes the venues it skipped. An unknown name is rejected rather
+than ignored: a typo would otherwise make the slow tier refresh everything on the fast tier's
+cadence.
 
 When on-chain push is enabled, the request also carries `oracle_keys` and a top-level `secrets_ref` so the worker can sign the contract update inside TEE.
 

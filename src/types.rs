@@ -3,6 +3,21 @@ use serde::{Deserialize, Serialize};
 // Default max age for cached prices (2 minutes)
 pub const DEFAULT_MAX_AGE_SECS: u64 = 120;
 
+/// Window the stored `price` field is aggregated over.
+///
+/// The record keeps every observation, but its headline price has to commit to one window, and
+/// this is it — the same 2 minutes a caller gets by default, and the window the slow tier
+/// (Pyth, Chainlink) is sized to stay inside. Consumers who need tighter freshness do not
+/// depend on this: they pass their own `max_age_secs` and the aggregate is rebuilt for them.
+pub const CANONICAL_WINDOW_SECS: u64 = DEFAULT_MAX_AGE_SECS;
+
+/// How long an untouched source survives in the stored record.
+///
+/// Generous on purpose: every read filters by age, so keeping an entry costs nothing, while
+/// dropping one too early would make a merely-late tier look like a failed one. The ceiling
+/// exists so a permanently dead venue eventually stops appearing as a source at all.
+pub const SOURCE_RETENTION_SECS: u64 = 900;
+
 // Price deviation threshold for alerts (5%)
 pub const PRICE_DEVIATION_ALERT_THRESHOLD: f64 = 5.0;
 
@@ -51,9 +66,22 @@ fn default_min_sources() -> u8 {
 pub enum OracleCommand {
     /// Update prices in public storage (triggered by scheduler)
     /// WASI fetches prices from sources and stores them
+    ///
+    /// A refresh may cover only part of the configured venues — see `only_sources` /
+    /// `exclude_sources`. What it fetches is merged into the stored record rather than
+    /// replacing it, so tiers running at different cadences accumulate into one breakdown.
     UpdatePrices {
         /// Tokens to update (e.g., ["bitcoin", "ethereum"])
         tokens: Vec<String>,
+        /// Refresh only these sources, leaving every other venue in the record untouched.
+        /// This is how the slow tier is driven: `["pyth", "chainlink"]` on a 2-minute cadence,
+        /// while the cheap all-ticker venues refresh every few seconds.
+        #[serde(default)]
+        only_sources: Option<Vec<String>>,
+        /// Refresh every source except these — the fast tier's half of the same split.
+        /// Combined with `only_sources` it narrows twice.
+        #[serde(default)]
+        exclude_sources: Option<Vec<String>>,
         /// Whether to also call report_prices on the contract
         #[serde(default)]
         update_contract: bool,

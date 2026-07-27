@@ -6,7 +6,7 @@ use crate::{parsers, ExchangeConfig, SourcePrice};
 #[cfg(feature = "wasi")]
 use crate::{CustomSourceConfig, HttpResponse};
 use anyhow::Result;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Connect timeout for every source request.
 ///
@@ -23,7 +23,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 /// default, so every outbound request sets one explicitly.
 pub const USER_AGENT: &str = "oracle-ark/1.0 (+https://github.com/zavodil/oracle-ark)";
 
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+/// WASI-only: the async (scheduler) build drives reqwest, which carries its own 30s total
+/// timeout set where the client is built.
+#[cfg(feature = "wasi")]
+const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 
 fn current_timestamp() -> u64 {
     SystemTime::now()
@@ -49,11 +52,88 @@ enum ChainlinkError {
 // WASI (sync) implementation
 // ============================================================================
 
+// ----------------------------------------------------------------------------
+// Batch plumbing shared by both backends
+//
+// The WASI worker and the scheduler differ only in how they issue an HTTP GET; grouping
+// tokens by symbol and fanning a venue's answer back out is identical work. Keeping one copy
+// means a venue cannot end up batched correctly on one side and per-token on the other.
+// ----------------------------------------------------------------------------
+
+/// Symbols of one source mapped to the tokens that asked for them.
+///
+/// A `BTreeMap` keeps the request order stable across runs (a `HashMap` would reshuffle the
+/// symbol list on every invocation, which makes logs and responses harder to diff), and
+/// several tokens may legitimately share a symbol.
+#[cfg(any(feature = "wasi", feature = "async"))]
+pub(crate) type SymbolIndex<'a> = std::collections::BTreeMap<&'a str, Vec<&'a str>>;
+
+/// Group the requested tokens by the symbol each of them uses for one source
+#[cfg(any(feature = "wasi", feature = "async"))]
+pub(crate) fn index_symbols<'a, F>(
+    configs: &'a std::collections::HashMap<String, ExchangeConfig>,
+    symbol_of: F,
+) -> SymbolIndex<'a>
+where
+    F: Fn(&'a ExchangeConfig) -> Option<&'a str>,
+{
+    let mut index = SymbolIndex::new();
+    for (token, config) in configs {
+        if let Some(symbol) = symbol_of(config) {
+            index.entry(symbol).or_default().push(token.as_str());
+        }
+    }
+    index
+}
+
+/// Fan one source's batch result back out to every token that requested those symbols.
+///
+/// `resolve_timestamp` produces the `SourcePrice.timestamp` and may return `None` to drop the
+/// price — Pyth uses that for its per-feed staleness rule.
+#[cfg(any(feature = "wasi", feature = "async"))]
+pub(crate) fn fan_out<F>(
+    out: &mut std::collections::HashMap<String, Vec<SourcePrice>>,
+    index: &SymbolIndex<'_>,
+    prices: &parsers::BatchPrices,
+    source_name: &str,
+    resolve_timestamp: F,
+) where
+    F: Fn(&str, &parsers::BatchPrice) -> Option<u64>,
+{
+    for (symbol, tokens) in index {
+        if let Some(entry) = prices.get(*symbol) {
+            if let Some(timestamp) = resolve_timestamp(symbol, entry) {
+                for token in tokens {
+                    if let Some(collected) = out.get_mut(*token) {
+                        collected.push(SourcePrice {
+                            source_name: source_name.to_string(),
+                            price: entry.price,
+                            timestamp,
+                        });
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Per-feed Pyth staleness rule, applied identically by both backends.
+#[cfg(any(feature = "wasi", feature = "async"))]
+pub(crate) fn pyth_publish_time(feed: &str, entry: &parsers::BatchPrice) -> Option<u64> {
+    let publish_time = entry.timestamp?;
+    let age = current_timestamp().saturating_sub(publish_time);
+    if age > parsers::PYTH_MAX_AGE_SECS {
+        eprintln!("Pyth price {} is stale (published {} seconds ago)", feed, age);
+        return None;
+    }
+    Some(publish_time)
+}
+
 #[cfg(feature = "wasi")]
 pub mod sync {
     use super::*;
     use crate::{LAST_CHAINLINK_RPC, CHAINLINK_DISABLED};
-    use std::collections::{BTreeMap, HashMap};
+    use std::collections::HashMap;
     use wasi_http_client::Client;
 
     fn http_get(url: &str) -> Result<HttpResponse> {
@@ -563,13 +643,6 @@ pub mod sync {
     /// Status Binance answers with when a single symbol in a batch is unknown
     const HTTP_BAD_REQUEST: u16 = 400;
 
-    /// Symbols of one source mapped to the tokens that asked for them.
-    ///
-    /// A `BTreeMap` keeps the request order stable across runs (a `HashMap` would reshuffle
-    /// the symbol list on every invocation, which makes logs and responses harder to diff),
-    /// and several tokens may legitimately share a symbol.
-    type SymbolIndex<'a> = BTreeMap<&'a str, Vec<&'a str>>;
-
     /// GET a batch endpoint, returning the status alongside the raw body so a caller can
     /// react to a specific status instead of only to "not 2xx".
     fn http_get_text_with_status(url: &str) -> Result<(u16, String)> {
@@ -823,53 +896,6 @@ pub mod sync {
         parsers::parse_mexc_batch(&body, symbols)
     }
 
-    /// Group the requested tokens by the symbol each of them uses for one source
-    fn index_symbols<'a, F>(
-        configs: &'a HashMap<String, ExchangeConfig>,
-        symbol_of: F,
-    ) -> SymbolIndex<'a>
-    where
-        F: Fn(&'a ExchangeConfig) -> Option<&'a str>,
-    {
-        let mut index = SymbolIndex::new();
-        for (token, config) in configs {
-            if let Some(symbol) = symbol_of(config) {
-                index.entry(symbol).or_default().push(token.as_str());
-            }
-        }
-        index
-    }
-
-    /// Fan one source's batch result back out to every token that requested those symbols.
-    ///
-    /// `resolve_timestamp` produces the `SourcePrice.timestamp` and may return `None` to drop
-    /// the price — Pyth uses that for its per-feed staleness rule.
-    fn fan_out<F>(
-        out: &mut HashMap<String, Vec<SourcePrice>>,
-        index: &SymbolIndex<'_>,
-        prices: &parsers::BatchPrices,
-        source_name: &str,
-        resolve_timestamp: F,
-    ) where
-        F: Fn(&str, &parsers::BatchPrice) -> Option<u64>,
-    {
-        for (symbol, tokens) in index {
-            if let Some(entry) = prices.get(*symbol) {
-                if let Some(timestamp) = resolve_timestamp(symbol, entry) {
-                    for token in tokens {
-                        if let Some(collected) = out.get_mut(*token) {
-                            collected.push(SourcePrice {
-                                source_name: source_name.to_string(),
-                                price: entry.price,
-                                timestamp,
-                            });
-                        }
-                    }
-                }
-            }
-        }
-    }
-
     /// Fetch every configured source for a whole set of tokens with ONE request per source.
     ///
     /// The per-token path issues `tokens x sources` requests — ~66 for the 11 assets we
@@ -937,16 +963,8 @@ pub mod sync {
         if !pyth.is_empty() {
             let price_ids: Vec<&str> = pyth.keys().copied().collect();
             match fetch_pyth_batch(&price_ids) {
-                Ok(prices) => fan_out(&mut out, &pyth, &prices, "pyth", |feed, entry| {
-                    // Same per-feed freshness rule as the single-feed path
-                    let publish_time = entry.timestamp?;
-                    let age = current_timestamp().saturating_sub(publish_time);
-                    if age > parsers::PYTH_MAX_AGE_SECS {
-                        eprintln!("Pyth price {} is stale (published {} seconds ago)", feed, age);
-                        return None;
-                    }
-                    Some(publish_time)
-                }),
+                // Same per-feed freshness rule as the single-feed path
+                Ok(prices) => fan_out(&mut out, &pyth, &prices, "pyth", pyth_publish_time),
                 Err(e) => eprintln!("pyth batch failed: {}", e),
             }
         }
@@ -1110,6 +1128,7 @@ pub mod sync {
 #[cfg(feature = "async")]
 pub mod r#async {
     use super::*;
+    use crate::{CHAINLINK_DISABLED, LAST_CHAINLINK_RPC};
 
     pub async fn fetch_coingecko(
         client: &reqwest::Client,
@@ -1587,5 +1606,345 @@ pub mod r#async {
         }
 
         prices
+    }
+
+    // ------------------------------------------------------------------------
+    // Batch fetching: ONE request per source for the whole token set
+    // ------------------------------------------------------------------------
+
+    /// Status Binance answers with when a single symbol in a batch is unknown
+    const HTTP_BAD_REQUEST: u16 = 400;
+
+    async fn http_get_text_with_status(client: &reqwest::Client, url: &str) -> Result<(u16, String)> {
+        let response = client.get(url).send().await?;
+        let status = response.status().as_u16();
+        Ok((status, response.text().await?))
+    }
+
+    async fn http_get_text(client: &reqwest::Client, url: &str) -> Result<String> {
+        let (status, body) = http_get_text_with_status(client, url).await?;
+        if !(200..300).contains(&status) {
+            anyhow::bail!("HTTP {}", status);
+        }
+        Ok(body)
+    }
+
+    /// Fall back to one request per symbol when a venue rejects a whole batch over a single bad
+    /// symbol — the same isolation the WASI side does, so one stale entry in the asset config
+    /// cannot drop the venue for every token.
+    async fn fetch_per_symbol<'a, F, Fut>(symbols: &[&'a str], fetch: F) -> parsers::BatchPrices
+    where
+        F: Fn(&'a str) -> Fut,
+        Fut: std::future::Future<Output = Result<SourcePrice>>,
+    {
+        let mut prices = parsers::BatchPrices::new();
+        for symbol in symbols {
+            match fetch(symbol).await {
+                Ok(price) => {
+                    prices.insert(
+                        symbol.to_string(),
+                        parsers::BatchPrice {
+                            price: price.price,
+                            timestamp: None,
+                        },
+                    );
+                }
+                Err(e) => eprintln!("{} failed: {}", symbol, e),
+            }
+        }
+        prices
+    }
+
+    async fn fetch_chainlink_batch(
+        client: &reqwest::Client,
+        feed_addresses: &[&str],
+    ) -> Result<parsers::BatchPrices> {
+        if CHAINLINK_DISABLED.load(std::sync::atomic::Ordering::Relaxed) {
+            anyhow::bail!("Chainlink disabled (all RPCs failed)");
+        }
+
+        let body = parsers::chainlink_multicall_body(feed_addresses)?;
+        let body_str = serde_json::to_string(&body)?;
+
+        // Start from the last working RPC index, then cycle through the rest
+        let last_idx = LAST_CHAINLINK_RPC.load(std::sync::atomic::Ordering::Relaxed);
+        let rpcs = parsers::CHAINLINK_RPC_URLS;
+        let mut errors = Vec::new();
+
+        for i in 0..rpcs.len() {
+            let idx = (last_idx + i) % rpcs.len();
+            let rpc_url = rpcs[idx];
+
+            let attempt = async {
+                let response = client
+                    .post(rpc_url)
+                    .header("Content-Type", "application/json")
+                    .body(body_str.clone())
+                    .send()
+                    .await?;
+                if !response.status().is_success() {
+                    anyhow::bail!("{}: HTTP {}", rpc_url, response.status());
+                }
+                let json: serde_json::Value = response.json().await?;
+                parsers::parse_chainlink_multicall(&json, feed_addresses)
+                    .map_err(|e| anyhow::anyhow!("{}: {}", rpc_url, e))
+            }
+            .await;
+
+            match attempt {
+                Ok(batch) => {
+                    LAST_CHAINLINK_RPC.store(idx, std::sync::atomic::Ordering::Relaxed);
+                    for (address, reason) in &batch.failures {
+                        eprintln!("Chainlink feed {} unavailable: {}", address, reason);
+                    }
+                    return Ok(batch.prices);
+                }
+                Err(e) => {
+                    eprintln!("Chainlink RPC failed: {}", e);
+                    errors.push(e.to_string());
+                }
+            }
+        }
+
+        CHAINLINK_DISABLED.store(true, std::sync::atomic::Ordering::Relaxed);
+        anyhow::bail!("all Chainlink RPCs failed: {}", errors.join("; "))
+    }
+
+    /// Fetch every configured source for a whole set of tokens with ONE request per source.
+    ///
+    /// The scheduler used to call `fetch_all_sources` per token purely to decide whether
+    /// anything moved: 182 requests per poll for our 18 assets, against ~16 for the refresh
+    /// those requests were guarding. That put Kraken and Bitstamp permanently over their rate
+    /// limits, and the resulting gaps changed the scheduler's median without changing the
+    /// worker's — which is exactly what makes a deviation trigger fire forever.
+    ///
+    /// Semantics match the WASI batch: sources are queried in the same order, a source that
+    /// fails contributes nothing and never aborts the others, and `SourcePrice.timestamp` is
+    /// the fetch time except for Pyth, where it is the feed's own `publish_time`.
+    pub async fn fetch_all_sources_batch(
+        client: &reqwest::Client,
+        configs: &std::collections::HashMap<String, ExchangeConfig>,
+        api_key: Option<&str>,
+    ) -> std::collections::HashMap<String, Vec<SourcePrice>> {
+        let mut out: std::collections::HashMap<String, Vec<SourcePrice>> = configs
+            .keys()
+            .map(|token| (token.clone(), Vec::new()))
+            .collect();
+
+        let fetched_now = |_: &str, _: &parsers::BatchPrice| Some(current_timestamp());
+
+        /// One venue whose whole batch is a single GET: index the symbols, run `$body` with
+        /// them in scope, fan the answer back out. A failing venue only logs — it must never
+        /// abort the ones after it.
+        macro_rules! venue {
+            ($field:expr, $name:literal, $symbols:ident => $body:expr) => {{
+                let index = index_symbols(configs, $field);
+                if !index.is_empty() {
+                    let $symbols: Vec<&str> = index.keys().copied().collect();
+                    let result: Result<parsers::BatchPrices> = async { $body }.await;
+                    match result {
+                        Ok(prices) => fan_out(&mut out, &index, &prices, $name, fetched_now),
+                        Err(e) => eprintln!("{} batch failed: {}", $name, e),
+                    }
+                }
+            }};
+        }
+
+        let coingecko = index_symbols(configs, |c: &ExchangeConfig| c.coingecko.as_deref());
+        if !coingecko.is_empty() {
+            let ids: Vec<&str> = coingecko.keys().copied().collect();
+            match http_get_text(client, &parsers::coingecko_batch_url(&ids, api_key)).await {
+                Ok(body) => match parsers::parse_coingecko_batch(&body, &ids) {
+                    Ok(prices) => fan_out(&mut out, &coingecko, &prices, "coingecko", fetched_now),
+                    Err(e) => eprintln!("coingecko batch failed: {}", e),
+                },
+                Err(e) => eprintln!("coingecko batch failed: {}", e),
+            }
+        }
+
+        // Binance rejects the WHOLE batch when one symbol is unknown; only then pay per symbol
+        let binance = index_symbols(configs, |c: &ExchangeConfig| c.binance.as_deref());
+        if !binance.is_empty() {
+            let symbols: Vec<&str> = binance.keys().copied().collect();
+            let url = parsers::binance_batch_url(&symbols);
+            match http_get_text_with_status(client, &url).await {
+                Ok((status, body)) => {
+                    let parsed = if status == HTTP_BAD_REQUEST {
+                        eprintln!("Binance rejected the batch ({}), retrying per symbol", body.trim());
+                        Ok(fetch_per_symbol(&symbols, |s| fetch_binance(client, s)).await)
+                    } else if !(200..300).contains(&status) {
+                        Err(anyhow::anyhow!("HTTP {}", status))
+                    } else {
+                        parsers::parse_binance_batch(&body, &symbols)
+                    };
+                    match parsed {
+                        Ok(prices) => fan_out(&mut out, &binance, &prices, "binance", fetched_now),
+                        Err(e) => eprintln!("binance batch failed: {}", e),
+                    }
+                }
+                Err(e) => eprintln!("binance batch failed: {}", e),
+            }
+        }
+
+        let binance_us = index_symbols(configs, |c: &ExchangeConfig| c.binance_us.as_deref());
+        if !binance_us.is_empty() {
+            let symbols: Vec<&str> = binance_us.keys().copied().collect();
+            let url = parsers::binance_us_batch_url(&symbols);
+            match http_get_text_with_status(client, &url).await {
+                Ok((status, body)) => {
+                    let parsed = if status == HTTP_BAD_REQUEST {
+                        eprintln!("Binance.US rejected the batch ({}), retrying per symbol", body.trim());
+                        Ok(fetch_per_symbol(&symbols, |s| fetch_binance_us(client, s)).await)
+                    } else if !(200..300).contains(&status) {
+                        Err(anyhow::anyhow!("HTTP {}", status))
+                    } else {
+                        parsers::parse_binance_batch(&body, &symbols)
+                    };
+                    match parsed {
+                        Ok(prices) => {
+                            fan_out(&mut out, &binance_us, &prices, "binance_us", fetched_now)
+                        }
+                        Err(e) => eprintln!("binance_us batch failed: {}", e),
+                    }
+                }
+                Err(e) => eprintln!("binance_us batch failed: {}", e),
+            }
+        }
+
+        // Binance serves the Alpha listing gzipped by default, hence the identity encoding
+        venue!(
+            |c: &ExchangeConfig| c.binance_alpha.as_deref(),
+            "binance_alpha",
+            addresses => {
+                let response = client
+                    .get(parsers::binance_alpha_url())
+                    .header("Accept-Encoding", "identity")
+                    .send()
+                    .await?;
+                if !response.status().is_success() {
+                    anyhow::bail!("HTTP {}", response.status());
+                }
+                parsers::parse_binance_alpha_batch(&response.text().await?, &addresses)
+            }
+        );
+
+        let pyth = index_symbols(configs, |c: &ExchangeConfig| c.pyth_id());
+        if !pyth.is_empty() {
+            let price_ids: Vec<&str> = pyth.keys().copied().collect();
+            let url = parsers::pyth_batch_url(&price_ids);
+            match http_get_text(client, &url).await {
+                Ok(body) => match parsers::parse_pyth_batch(&body, &price_ids) {
+                    Ok(prices) => fan_out(&mut out, &pyth, &prices, "pyth", pyth_publish_time),
+                    Err(e) => eprintln!("pyth batch failed: {}", e),
+                },
+                Err(e) => eprintln!("pyth batch failed: {}", e),
+            }
+        }
+
+        let chainlink = index_symbols(configs, |c: &ExchangeConfig| c.chainlink.as_deref());
+        if !chainlink.is_empty() {
+            let feeds: Vec<&str> = chainlink.keys().copied().collect();
+            match fetch_chainlink_batch(client, &feeds).await {
+                Ok(prices) => fan_out(&mut out, &chainlink, &prices, "chainlink", fetched_now),
+                Err(e) => eprintln!("chainlink batch failed: {}", e),
+            }
+        }
+
+        venue!(
+            |c: &ExchangeConfig| c.huobi.as_deref(),
+            "huobi",
+            symbols => {
+                let body = http_get_text(client, &parsers::huobi_batch_url()).await?;
+                parsers::parse_huobi_batch(&body, &symbols)
+            }
+        );
+        venue!(
+            |c: &ExchangeConfig| c.kucoin.as_deref(),
+            "kucoin",
+            symbols => {
+                let body = http_get_text(client, &parsers::kucoin_batch_url()).await?;
+                parsers::parse_kucoin_batch(&body, &symbols)
+            }
+        );
+        venue!(
+            |c: &ExchangeConfig| c.gate.as_deref(),
+            "gate",
+            pairs => {
+                let body = http_get_text(client, &parsers::gate_batch_url()).await?;
+                parsers::parse_gate_batch(&body, &pairs)
+            }
+        );
+        venue!(
+            |c: &ExchangeConfig| c.cryptocom.as_deref(),
+            "cryptocom",
+            instruments => {
+                let body = http_get_text(client, &parsers::cryptocom_batch_url()).await?;
+                parsers::parse_cryptocom_batch(&body, &instruments)
+            }
+        );
+
+        // Kraken answers an unknown pair with an error object rather than a status code
+        let kraken = index_symbols(configs, |c: &ExchangeConfig| c.kraken.as_deref());
+        if !kraken.is_empty() {
+            let pairs: Vec<&str> = kraken.keys().copied().collect();
+            match http_get_text(client, &parsers::kraken_batch_url(&pairs)).await {
+                Ok(body) => {
+                    let parsed = if parsers::is_kraken_unknown_pair(&body) {
+                        eprintln!("Kraken rejected the batch ({}), retrying per pair", body.trim());
+                        Ok(fetch_per_symbol(&pairs, |p| fetch_kraken(client, p)).await)
+                    } else {
+                        parsers::parse_kraken_batch(&body, &pairs)
+                    };
+                    match parsed {
+                        Ok(prices) => fan_out(&mut out, &kraken, &prices, "kraken", fetched_now),
+                        Err(e) => eprintln!("kraken batch failed: {}", e),
+                    }
+                }
+                Err(e) => eprintln!("kraken batch failed: {}", e),
+            }
+        }
+
+        venue!(
+            |c: &ExchangeConfig| c.coinbase.as_deref(),
+            "coinbase",
+            product_ids => {
+                let body = http_get_text(client, &parsers::coinbase_batch_url()).await?;
+                parsers::parse_coinbase_batch(&body, &product_ids)
+            }
+        );
+        venue!(
+            |c: &ExchangeConfig| c.bitstamp.as_deref(),
+            "bitstamp",
+            pairs => {
+                let body = http_get_text(client, &parsers::bitstamp_batch_url()).await?;
+                parsers::parse_bitstamp_batch(&body, &pairs)
+            }
+        );
+        venue!(
+            |c: &ExchangeConfig| c.okx.as_deref(),
+            "okx",
+            inst_ids => {
+                let body = http_get_text(client, &parsers::okx_batch_url()).await?;
+                parsers::parse_okx_batch(&body, &inst_ids)
+            }
+        );
+        venue!(
+            |c: &ExchangeConfig| c.bitget.as_deref(),
+            "bitget",
+            symbols => {
+                let body = http_get_text(client, &parsers::bitget_batch_url()).await?;
+                parsers::parse_bitget_batch(&body, &symbols)
+            }
+        );
+        venue!(
+            |c: &ExchangeConfig| c.mexc.as_deref(),
+            "mexc",
+            symbols => {
+                let body = http_get_text(client, &parsers::mexc_batch_url()).await?;
+                parsers::parse_mexc_batch(&body, &symbols)
+            }
+        );
+
+        out
     }
 }

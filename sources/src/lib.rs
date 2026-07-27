@@ -92,6 +92,104 @@ impl ExchangeConfig {
             .as_deref()
             .map(|s| s.strip_prefix("0x").unwrap_or(s))
     }
+
+    /// The venues this asset has configured, by the names used everywhere else.
+    ///
+    /// Lives next to the struct so there is exactly one mapping from a source name onto a
+    /// field. The worker's exclusion filter and the scheduler's tier selection both consume it;
+    /// a venue added to the struct but forgotten here would look unconfigured to both.
+    pub fn configured_sources(&self) -> Vec<&'static str> {
+        let mut sources = Vec::new();
+        if self.coingecko.is_some() {
+            sources.push("coingecko");
+        }
+        if self.binance.is_some() {
+            sources.push("binance");
+        }
+        if self.binance_us.is_some() {
+            sources.push("binance_us");
+        }
+        if self.binance_alpha.is_some() {
+            sources.push("binance_alpha");
+        }
+        if self.pyth.is_some() {
+            sources.push("pyth");
+        }
+        if self.chainlink.is_some() {
+            sources.push("chainlink");
+        }
+        if self.huobi.is_some() {
+            sources.push("huobi");
+        }
+        if self.kucoin.is_some() {
+            sources.push("kucoin");
+        }
+        if self.gate.is_some() {
+            sources.push("gate");
+        }
+        if self.cryptocom.is_some() {
+            sources.push("cryptocom");
+        }
+        if self.kraken.is_some() {
+            sources.push("kraken");
+        }
+        if self.coinbase.is_some() {
+            sources.push("coinbase");
+        }
+        if self.bitstamp.is_some() {
+            sources.push("bitstamp");
+        }
+        if self.okx.is_some() {
+            sources.push("okx");
+        }
+        if self.bitget.is_some() {
+            sources.push("bitget");
+        }
+        if self.mexc.is_some() {
+            sources.push("mexc");
+        }
+        sources
+    }
+
+    /// Whether this asset configures any of the named venues (case-insensitive).
+    /// Used to decide which assets participate in a tier.
+    pub fn configures_any(&self, names: &[String]) -> bool {
+        self.configured_sources()
+            .iter()
+            .any(|source| names.iter().any(|n| n.eq_ignore_ascii_case(source)))
+    }
+
+    /// A copy with the named venues cleared.
+    ///
+    /// Fetching is driven purely by which fields are `Some`, so clearing a field removes that
+    /// venue from the fetch. A name this does not recognise leaves the config untouched, which
+    /// would silently keep a source the caller believes is gone — callers must validate names
+    /// first (the worker rejects unknown ones outright).
+    pub fn without_sources(&self, names: &[String]) -> Self {
+        let mut filtered = self.clone();
+        for name in names {
+            match name.to_ascii_lowercase().as_str() {
+                "coingecko" => filtered.coingecko = None,
+                "binance" => filtered.binance = None,
+                "binance_us" => filtered.binance_us = None,
+                "binance_alpha" => filtered.binance_alpha = None,
+                "pyth" => filtered.pyth = None,
+                "chainlink" => filtered.chainlink = None,
+                "huobi" => filtered.huobi = None,
+                "kucoin" => filtered.kucoin = None,
+                "gate" => filtered.gate = None,
+                "cryptocom" => filtered.cryptocom = None,
+                "kraken" => filtered.kraken = None,
+                "coinbase" => filtered.coinbase = None,
+                "bitstamp" => filtered.bitstamp = None,
+                "okx" => filtered.okx = None,
+                "bitget" => filtered.bitget = None,
+                "mexc" => filtered.mexc = None,
+                _ => {}
+            }
+        }
+        filtered
+    }
 }
 
 /// Custom source configuration

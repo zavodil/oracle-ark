@@ -99,112 +99,81 @@ function sourceAgeRange(sources: PriceSource[] | undefined): { min: number; max:
 const RING_CIRCUMFERENCE = 2 * Math.PI * 10;
 
 /**
- * Refresh control: one component carrying all three jobs — refresh now, show how long until the
- * next automatic refresh, and turn that automation off.
- *
- * Deliberately one control rather than a button plus a floating ring elsewhere on the page: the
- * countdown used to live in a corner widget nobody looked at, which is why "it refreshes" was
- * invisible even though it was happening.
+ * Auto-refresh toggle. Its only job is on/off; while on it doubles as the countdown to the next
+ * automatic refresh, so the seconds sit right next to the Refresh button instead of in a corner
+ * widget nobody looked at. Clicking it never refreshes — that is the separate button's job, and
+ * that button works whether this is on or off.
  */
-function RefreshControl({
+function AutoRefreshToggle({
   countdown,
-  autoRefresh,
+  enabled,
   refreshing,
-  onRefresh,
-  onToggleAuto,
+  onToggle,
 }: {
   countdown: number;
-  autoRefresh: boolean;
+  enabled: boolean;
   refreshing: boolean;
-  onRefresh: () => void;
-  onToggleAuto: () => void;
+  onToggle: () => void;
 }) {
-  const progress = autoRefresh ? (REFRESH_INTERVAL_SEC - countdown) / REFRESH_INTERVAL_SEC : 0;
+  const progress = enabled ? (REFRESH_INTERVAL_SEC - countdown) / REFRESH_INTERVAL_SEC : 0;
   // Snap instead of animating when the ring wraps back to full, otherwise every cycle ends with
   // a one-second rewind
   const wrapping = countdown >= REFRESH_INTERVAL_SEC;
 
   return (
-    <div className="flex items-stretch rounded-lg border border-dark-700 bg-dark-800 overflow-hidden">
-      <button
-        type="button"
-        onClick={onRefresh}
-        title="Refresh now"
-        className="flex items-center gap-2.5 pl-2.5 pr-3.5 py-2 hover:bg-dark-700 active:bg-dark-600 transition-colors group"
-      >
-        <span className="relative w-7 h-7 shrink-0">
-          <svg className="w-7 h-7 -rotate-90" viewBox="0 0 24 24" aria-hidden="true">
-            <circle cx="12" cy="12" r="10" strokeWidth="2" className="fill-none stroke-dark-700" />
-            <circle
-              cx="12"
-              cy="12"
-              r="10"
-              strokeWidth="2"
-              strokeLinecap="round"
-              className={`fill-none transition-colors ${
-                refreshing
-                  ? 'stroke-green-400'
-                  : autoRefresh
-                  ? 'stroke-primary group-hover:stroke-green-400'
-                  : 'stroke-dark-600'
-              }`}
-              strokeDasharray={RING_CIRCUMFERENCE}
-              strokeDashoffset={RING_CIRCUMFERENCE * (1 - progress)}
-              style={{ transition: wrapping ? 'none' : 'stroke-dashoffset 1s linear' }}
-            />
-          </svg>
-          <span
-            className={`absolute inset-0 flex items-center justify-center font-mono text-[11px] tabular-nums transition-colors ${
-              refreshing
-                ? 'text-green-400'
-                : autoRefresh
-                ? 'text-dark-300 group-hover:text-green-400'
-                : 'text-dark-500'
+    <button
+      type="button"
+      onClick={onToggle}
+      aria-pressed={enabled}
+      title={enabled ? 'Auto-refresh on — click to turn off' : 'Auto-refresh off — click to turn on'}
+      className={`flex items-center gap-2.5 pl-2 pr-3.5 py-1.5 rounded-lg border transition-colors ${
+        enabled
+          ? 'border-dark-700 bg-dark-800 hover:border-dark-600'
+          : 'border-dark-800 bg-dark-900 hover:border-dark-700'
+      }`}
+    >
+      <span className="relative w-7 h-7 shrink-0">
+        <svg className="w-7 h-7 -rotate-90" viewBox="0 0 24 24" aria-hidden="true">
+          <circle cx="12" cy="12" r="10" strokeWidth="2" className="fill-none stroke-dark-700" />
+          <circle
+            cx="12"
+            cy="12"
+            r="10"
+            strokeWidth="2"
+            strokeLinecap="round"
+            className={`fill-none transition-colors ${
+              refreshing ? 'stroke-green-400' : enabled ? 'stroke-primary' : 'stroke-transparent'
             }`}
-          >
-            {autoRefresh ? (
-              countdown
-            ) : (
-              <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth={2}
-                  d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
-                />
-              </svg>
-            )}
-          </span>
+            strokeDasharray={RING_CIRCUMFERENCE}
+            strokeDashoffset={RING_CIRCUMFERENCE * (1 - progress)}
+            style={{ transition: wrapping ? 'none' : 'stroke-dashoffset 1s linear' }}
+          />
+        </svg>
+        <span
+          className={`absolute inset-0 flex items-center justify-center font-mono text-[11px] tabular-nums transition-colors ${
+            refreshing ? 'text-green-400' : enabled ? 'text-dark-200' : 'text-dark-600'
+          }`}
+        >
+          {enabled ? (
+            countdown
+          ) : (
+            // A struck-through circle reads as "off" without needing a word for it
+            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
+              <circle cx="12" cy="12" r="8" strokeWidth="2" />
+              <path strokeLinecap="round" strokeWidth="2" d="M6.5 6.5l11 11" />
+            </svg>
+          )}
         </span>
-        <span className="text-sm text-dark-200 group-hover:text-white transition-colors">
-          Refresh
-        </span>
-      </button>
-
-      <div className="w-px bg-dark-700" aria-hidden="true" />
-
-      <button
-        type="button"
-        onClick={onToggleAuto}
-        aria-pressed={autoRefresh}
-        title={autoRefresh ? 'Pause auto-refresh' : 'Resume auto-refresh'}
-        className={`px-3 hover:bg-dark-700 active:bg-dark-600 transition-colors ${
-          autoRefresh ? 'text-dark-400 hover:text-white' : 'text-dark-500 hover:text-primary'
-        }`}
+      </span>
+      <span
+        className={`text-sm transition-colors ${enabled ? 'text-dark-200' : 'text-dark-500'}`}
       >
-        {autoRefresh ? (
-          <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24" aria-hidden="true">
-            <rect x="6" y="5" width="4" height="14" rx="1" />
-            <rect x="14" y="5" width="4" height="14" rx="1" />
-          </svg>
-        ) : (
-          <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24" aria-hidden="true">
-            <path d="M8 5.5v13a1 1 0 001.53.848l10-6.5a1 1 0 000-1.696l-10-6.5A1 1 0 008 5.5z" />
-          </svg>
-        )}
-        <span className="sr-only">{autoRefresh ? 'Pause auto-refresh' : 'Resume auto-refresh'}</span>
-      </button>
-    </div>
+        Auto
+      </span>
+      <span className="sr-only">
+        {enabled ? `Auto-refresh on, next in ${countdown} seconds` : 'Auto-refresh off'}
+      </span>
+    </button>
   );
 }
 
@@ -212,13 +181,18 @@ function PriceCard({
   assetId,
   result,
   tokensConfig,
+  sourcesOpen,
+  onToggleSources,
 }: {
   assetId: string;
   result: PriceResult;
   tokensConfig: TokensConfig;
+  // Shared across every card: opening one breakdown opens them all, which is what makes the
+  // grid comparable — reading one venue's price against the others is the reason to open it
+  sourcesOpen: boolean;
+  onToggleSources: () => void;
 }) {
   const { data, error } = result;
-  const [sourcesOpen, setSourcesOpen] = useState(false);
   const fresh = data && isFresh(data.timestamp);
   const stablecoin = isStablecoin(assetId, tokensConfig);
   const sourceCount = getSourceCount(assetId, tokensConfig);
@@ -302,14 +276,14 @@ function PriceCard({
       </div>
 
       {/* Sources — collapsed by default, the breakdown is detail most visitors do not want.
-          Deliberately React state rather than <details>: the page re-fetches every 30s, and the
-          browser's own disclosure state is not something React owns, so an expanded card would
-          be at the mercy of reconciliation. This also keeps each card strictly independent. */}
+          React state rather than <details>: the page re-fetches on a timer, and the browser's
+          own disclosure state is not something React owns, so an expanded card would be at the
+          mercy of reconciliation. The state lives on the page, not here — see the props. */}
       {data && data.sources && data.sources.length > 0 && (
         <div className="mt-4 pt-4 border-t border-dark-700">
           <button
             type="button"
-            onClick={() => setSourcesOpen((open) => !open)}
+            onClick={onToggleSources}
             aria-expanded={sourcesOpen}
             className="w-full flex justify-between items-baseline cursor-pointer select-none group text-left"
           >
@@ -373,6 +347,7 @@ export default function PricesPage() {
   const [countdown, setCountdown] = useState(REFRESH_INTERVAL_SEC);
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [sourcesOpen, setSourcesOpen] = useState(false);
   const [freshCount, setFreshCount] = useState(0);
   const lastFetchTimeRef = useRef<number>(Date.now());
   const tokensConfigRef = useRef<TokensConfig>({});
@@ -505,18 +480,32 @@ export default function PricesPage() {
               {loading ? 'Loading prices...' : `${freshCount}/${allTokens.length} fresh prices`}
             </p>
           </div>
-          <div className="flex items-center gap-4">
-            <div className="flex items-center gap-2 text-sm text-dark-400">
+          <div className="flex items-center gap-3">
+            <div className="flex items-center gap-2 text-sm text-dark-400 mr-1">
               <span className="w-2 h-2 bg-green-400 rounded-full animate-pulse"></span>
               <span>Mainnet</span>
             </div>
-            <RefreshControl
+            <AutoRefreshToggle
               countdown={countdown}
-              autoRefresh={autoRefresh}
+              enabled={autoRefresh}
               refreshing={refreshing}
-              onRefresh={handleRefresh}
-              onToggleAuto={() => setAutoRefresh(v => !v)}
+              onToggle={() => setAutoRefresh(v => !v)}
             />
+            <button
+              onClick={handleRefresh}
+              title="Refresh now — works whether auto-refresh is on or off"
+              className="btn btn-secondary flex items-center gap-2"
+            >
+              <svg
+                className={`w-4 h-4 ${refreshing ? 'animate-spin' : ''}`}
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+              >
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+              </svg>
+              Refresh
+            </button>
           </div>
         </div>
 
@@ -581,6 +570,8 @@ export default function PricesPage() {
                 assetId={assetId}
                 result={prices[assetId] || { error: 'Not loaded' }}
                 tokensConfig={tokensConfig}
+                sourcesOpen={sourcesOpen}
+                onToggleSources={() => setSourcesOpen(open => !open)}
               />
             ))}
           </div>

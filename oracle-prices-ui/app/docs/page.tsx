@@ -714,12 +714,14 @@ repeated per entry:
   i64  publish_time          (little-endian)`}</code>
                 </pre>
                 <p className="text-dark-400 text-sm mt-3">
-                  <code className="text-primary">near_sdk::json_types::I64</code> works for{' '}
-                  <code className="text-primary">price</code> in both formats: it is a newtype over{' '}
-                  <code className="text-primary">i64</code>, so borsh writes the same eight little-endian bytes, and
-                  its JSON form is the decimal string we already emit. Declaring the field as{' '}
-                  <code className="text-primary">I64</code> rather than <code className="text-primary">i64</code>{' '}
-                  changes nothing on the wire and drops the manual parse.
+                  Use <code className="text-primary">near_sdk::json_types::I64</code> for{' '}
+                  <code className="text-primary">price</code> in both formats. Under borsh it is interchangeable with
+                  a plain <code className="text-primary">i64</code> — it is a newtype, so the same eight
+                  little-endian bytes are written either way. Under JSON it is <strong className="text-white">not
+                  optional</strong>: <code className="text-primary">price</code> is a decimal string, and a bare{' '}
+                  <code className="text-primary">i64</code> field fails to deserialize with{' '}
+                  <code className="text-primary">invalid type: string</code>. Declaring it as{' '}
+                  <code className="text-primary">I64</code> covers both and needs no manual parse.
                 </p>
               </details>
 

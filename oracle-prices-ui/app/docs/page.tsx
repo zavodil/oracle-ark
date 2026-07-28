@@ -641,6 +641,7 @@ vk.verify(payload.as_bytes(), &sig)?;   // payload as received, byte for byte`}<
                 <pre className="bg-dark-950 rounded-lg p-4 overflow-x-auto mt-4">
                   <code className="text-xs text-dark-300">{`use near_sdk::{env, near, require, store::LookupMap};
 use near_sdk::base64::{engine::general_purpose::STANDARD, Engine};
+use near_sdk::json_types::I64;
 use near_sdk::serde::Deserialize;
 use std::collections::HashMap;
 
@@ -651,7 +652,7 @@ const MAX_AGE_SECS: u64 = 120;
 #[derive(Deserialize)]
 #[serde(crate = "near_sdk::serde")]
 struct Entry {
-    price: String,      // i64 sent as a string to survive every JSON parser
+    price: I64,         // sent as a decimal string; I64 is exactly that convention
     expo: i32,
     publish_time: i64,
 }
@@ -683,8 +684,7 @@ impl Contract {
                 require!(published > prev.publish_time, "not newer than stored");
             }
 
-            let price: i64 = e.price.parse().expect("bad price");
-            self.prices.insert(asset, StoredPrice { price, expo: e.expo, publish_time: published });
+            self.prices.insert(asset, StoredPrice { price: e.price.0, expo: e.expo, publish_time: published });
         }
     }
 }`}</code>
@@ -713,6 +713,14 @@ repeated per entry:
   i32  expo                  (little-endian)
   i64  publish_time          (little-endian)`}</code>
                 </pre>
+                <p className="text-dark-400 text-sm mt-3">
+                  <code className="text-primary">near_sdk::json_types::I64</code> works for{' '}
+                  <code className="text-primary">price</code> in both formats: it is a newtype over{' '}
+                  <code className="text-primary">i64</code>, so borsh writes the same eight little-endian bytes, and
+                  its JSON form is the decimal string we already emit. Declaring the field as{' '}
+                  <code className="text-primary">I64</code> rather than <code className="text-primary">i64</code>{' '}
+                  changes nothing on the wire and drops the manual parse.
+                </p>
               </details>
 
               <h3 className="text-lg font-semibold text-white mb-4">Running it in production</h3>

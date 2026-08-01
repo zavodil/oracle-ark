@@ -12,10 +12,10 @@ use std::collections::HashMap;
 const ORACLE_CALL_DEPOSIT: NearToken = NearToken::from_millinear(20);
 
 // =============================================================================
-// Oracle-Ark types (from price-oracle.near)
+// Oracle Example types (from price-oracle.near)
 // =============================================================================
 
-/// Oracle-Ark price format: multiplier * 10^(-decimals) = USD price.
+/// Oracle Example price format: multiplier * 10^(-decimals) = USD price.
 /// Example: Price { multiplier: 450_000_000, decimals: 8 } = $4.50
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(crate = "near_sdk::serde")]
@@ -33,7 +33,7 @@ pub struct AssetOptionalPrice {
     pub price: Option<OracleArkPrice>,
 }
 
-/// Price data returned by Oracle-Ark's oracle_call callback.
+/// Price data returned by Oracle Example's oracle_call callback.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(crate = "near_sdk::serde")]
 pub struct PriceData {
@@ -58,7 +58,7 @@ pub struct PriceData {
 pub struct Price {
     /// Price value (signed).
     pub price: i64,
-    /// Confidence interval (uncertainty). Always 0 for Oracle-Ark (single aggregated price).
+    /// Confidence interval (uncertainty). Always 0 for Oracle Example (single aggregated price).
     pub conf: u64,
     /// Exponent: actual_price = price * 10^expo.
     pub expo: i32,
@@ -67,7 +67,7 @@ pub struct Price {
 }
 
 // =============================================================================
-// Cross-contract interface to Oracle-Ark
+// Cross-contract interface to Oracle Example
 // =============================================================================
 
 #[ext_contract(ext_oracle)]
@@ -126,14 +126,14 @@ enum StorageKey {
 #[derive(BorshDeserialize, BorshSerialize, PanicOnDefault)]
 #[borsh(crate = "near_sdk::borsh")]
 pub struct PythWrapper {
-    /// Oracle-Ark contract to read prices from (e.g. price-oracle.near).
+    /// Oracle Example contract to read prices from (e.g. price-oracle.near).
     oracle_contract_id: AccountId,
 
-    /// Mapping: Pyth PriceIdentifier (64-char hex) -> Oracle-Ark asset_id.
+    /// Mapping: Pyth PriceIdentifier (64-char hex) -> Oracle Example asset_id.
     /// Example: "c415de8d..." -> "wrap.near"
     price_id_to_asset: UnorderedMap<String, String>,
 
-    /// Reverse mapping: Oracle-Ark asset_id -> Pyth PriceIdentifier (hex).
+    /// Reverse mapping: Oracle Example asset_id -> Pyth PriceIdentifier (hex).
     asset_to_price_id: UnorderedMap<String, String>,
 
     /// Cached prices in Pyth format, keyed by PriceIdentifier hex.
@@ -154,7 +154,7 @@ pub struct PythWrapper {
 impl PythWrapper {
     /// Initialize the wrapper contract.
     ///
-    /// * `oracle_contract_id` — Oracle-Ark contract (e.g. "price-oracle.near")
+    /// * `oracle_contract_id` — Oracle Example contract (e.g. "price-oracle.near")
     /// * `stale_threshold` — Max age of prices in seconds before they're considered stale
     #[init]
     pub fn new(oracle_contract_id: AccountId, stale_threshold: u64) -> Self {
@@ -167,7 +167,7 @@ impl PythWrapper {
             owner_id: env::predecessor_account_id(),
         };
 
-        // Pre-populate default mainnet Pyth price_id -> Oracle-Ark asset_id mappings.
+        // Pre-populate default mainnet Pyth price_id -> Oracle Example asset_id mappings.
         let defaults: &[(&str, &str)] = &[
             // NEAR/USD
             ("c415de8d2efa7db216527dff4b60e8f3a5311c740dadb233e13e12547e226750", "wrap.near"),
@@ -192,7 +192,7 @@ impl PythWrapper {
     // Admin methods (owner only, require 1 yoctoNEAR deposit)
     // =========================================================================
 
-    /// Add a mapping between a Pyth PriceIdentifier and an Oracle-Ark asset_id.
+    /// Add a mapping between a Pyth PriceIdentifier and an Oracle Example asset_id.
     /// Requires exactly 1 yoctoNEAR deposit for access key security.
     #[payable]
     pub fn add_price_mapping(&mut self, price_id_hex: String, asset_id: String) {
@@ -232,7 +232,7 @@ impl PythWrapper {
         log!("Stale threshold set to {} seconds", threshold_sec);
     }
 
-    /// Set the Oracle-Ark contract ID.
+    /// Set the Oracle Example contract ID.
     #[payable]
     pub fn set_oracle_contract_id(&mut self, contract_id: AccountId) {
         self.assert_owner();
@@ -264,7 +264,7 @@ impl PythWrapper {
     }
 
     /// Get EMA price with staleness check.
-    /// Oracle-Ark does not provide separate EMA data, returns same as get_price.
+    /// Oracle Example does not provide separate EMA data, returns same as get_price.
     pub fn get_ema_price(&self, price_id: String) -> Option<Price> {
         self.internal_get_price_no_older_than(&price_id, self.stale_threshold)
     }
@@ -335,7 +335,7 @@ impl PythWrapper {
     // =========================================================================
 
     /// Update price feeds. In real Pyth this accepts Wormhole VAA data.
-    /// In this wrapper, we ignore the data and trigger a price refresh from Oracle-Ark.
+    /// In this wrapper, we ignore the data and trigger a price refresh from Oracle Example.
     /// Protocols that call update_price_feeds before get_price will still work.
     #[payable]
     pub fn update_price_feeds(&mut self, _data: String) {
@@ -355,16 +355,16 @@ impl PythWrapper {
     }
 
     /// Estimate fee for update_price_feeds.
-    /// Returns 1 yoctoNEAR — Oracle-Ark prices are already on-chain, no expensive update needed.
+    /// Returns 1 yoctoNEAR — Oracle Example prices are already on-chain, no expensive update needed.
     pub fn get_update_fee_estimate(&self, _data: String) -> U128 {
         U128(1)
     }
 
     // =========================================================================
-    // Oracle-Ark callback
+    // Oracle Example callback
     // =========================================================================
 
-    /// Callback from Oracle-Ark contract with fresh price data.
+    /// Callback from Oracle Example contract with fresh price data.
     /// Called automatically after oracle_call resolves.
     #[allow(unused_variables)]
     pub fn oracle_on_call(
@@ -378,7 +378,7 @@ impl PythWrapper {
             "Callback only from oracle contract"
         );
 
-        // Oracle-Ark timestamp is in nanoseconds, Pyth uses seconds.
+        // Oracle Example timestamp is in nanoseconds, Pyth uses seconds.
         let timestamp_sec = (data.timestamp / 1_000_000_000) as i64;
         let mut updated_count = 0u32;
 
@@ -405,10 +405,10 @@ impl PythWrapper {
     }
 
     // =========================================================================
-    // Refresh prices from Oracle-Ark
+    // Refresh prices from Oracle Example
     // =========================================================================
 
-    /// Trigger a price refresh from Oracle-Ark.
+    /// Trigger a price refresh from Oracle Example.
     /// Anyone can call this. The contract pays 0.02 NEAR from its own balance for the oracle call.
     #[payable]
     pub fn refresh_prices(&mut self) -> Promise {
@@ -430,7 +430,7 @@ impl PythWrapper {
     // Introspection view methods
     // =========================================================================
 
-    /// Get the Oracle-Ark contract ID.
+    /// Get the Oracle Example contract ID.
     pub fn get_oracle_contract_id(&self) -> AccountId {
         self.oracle_contract_id.clone()
     }
@@ -440,7 +440,7 @@ impl PythWrapper {
         self.owner_id.clone()
     }
 
-    /// Look up the Oracle-Ark asset_id for a given Pyth price_id.
+    /// Look up the Oracle Example asset_id for a given Pyth price_id.
     pub fn get_price_mapping(&self, price_id_hex: String) -> Option<String> {
         self.price_id_to_asset.get(&price_id_hex)
     }
@@ -476,7 +476,7 @@ impl PythWrapper {
 }
 
 // =============================================================================
-// Serde helpers for u128/u64 decimal string format (Oracle-Ark compatibility)
+// Serde helpers for u128/u64 decimal string format (Oracle Example compatibility)
 // =============================================================================
 
 mod u128_dec_format {

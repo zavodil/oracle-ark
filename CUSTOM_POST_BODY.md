@@ -125,8 +125,8 @@ cargo build --release
 
 # Run Alchemy example (replace with your API key in secrets)
 API_KEY="your-key" ./target/release/wasi-test \
-  --wasm ../oracle-ark/target/wasm32-wasip1/release/oracle-ark.wasm \
-  --input-file ../oracle-ark/example_alchemy_eth_balance.json \
+  --wasm ../oracle-example/target/wasm32-wasip1/release/oracle-example.wasm \
+  --input-file ../oracle-example/example_alchemy_eth_balance.json \
   --max-instructions 50000000000
 ```
 

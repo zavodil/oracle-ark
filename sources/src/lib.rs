@@ -1,4 +1,4 @@
-//! Shared price sources for oracle-ark
+//! Shared price sources for oracle-example
 //!
 //! This crate provides price fetching logic that works with both:
 //! - WASI (sync, using wasi-http-client)

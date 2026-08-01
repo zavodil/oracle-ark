@@ -1,6 +1,6 @@
 //! Price sources for the scheduler.
 //!
-//! Everything here delegates to the shared `oracle-ark-sources` crate, which is the same code
+//! Everything here delegates to the shared `oracle-example-sources` crate, which is the same code
 //! the TEE worker runs. That matters more than it looks: the scheduler's only job is to notice
 //! when its own view of a price disagrees with the worker's, so any difference in *how* the two
 //! sides fetch shows up as a permanent disagreement and a refresh trigger that never stops
@@ -11,8 +11,8 @@
 //! Exchange configs come from public storage (synced from the contract via DAO).
 
 use anyhow::Result;
-use oracle_ark_sources::sources::r#async as shared;
-use oracle_ark_sources::{parsers, ExchangeConfig, SourcePrice};
+use oracle_example_sources::sources::r#async as shared;
+use oracle_example_sources::{parsers, ExchangeConfig, SourcePrice};
 use std::collections::HashMap;
 use tracing::{debug, info};
 

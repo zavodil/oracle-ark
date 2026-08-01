@@ -1,12 +1,12 @@
-# Pyth-Compatible Wrapper for Oracle-Ark
+# Pyth-Compatible Wrapper for Oracle Example
 
-> **Legacy / optional.** This standalone wrapper contract is now legacy. The main Oracle-Ark contract `price-oracle.near` implements the Pyth receiver API **natively** (see `../contract/src/pyth.rs`). **Use the native Pyth methods on `price-oracle.near` unless you specifically need a separate contract address.**
+> **Legacy / optional.** This standalone wrapper contract is now legacy. The main Oracle Example contract `price-oracle.near` implements the Pyth receiver API **natively** (see `../contract/src/pyth.rs`). **Use the native Pyth methods on `price-oracle.near` unless you specifically need a separate contract address.**
 >
 > One behavioral difference: the native contract's `get_ema_price` returns a real EMA, whereas **this** wrapper's `get_ema_price` just returns the spot price (see this crate's `src/lib.rs`). Native Pyth price-feed mappings are managed via council actions `AddPriceMapping` / `RemovePriceMapping` / `SetPythStaleThreshold`.
 
-NEAR smart contract that implements the [Pyth receiver contract](https://github.com/pyth-network/pyth-crosschain/tree/main/target_chains/near/receiver) API, but internally uses [Oracle-Ark](https://github.com/zavodil/oracle-ark/tree/main/contract) (`price-oracle.near`) for price data.
+NEAR smart contract that implements the [Pyth receiver contract](https://github.com/pyth-network/pyth-crosschain/tree/main/target_chains/near/receiver) API, but internally uses [Oracle Example](https://github.com/out-layer/oracle-example/tree/main/contract) (`price-oracle.near`) for price data.
 
-DeFi protocols currently using Pyth can switch to Oracle-Ark with **zero code changes** — just update the contract address.
+DeFi protocols currently using Pyth can switch to Oracle Example with **zero code changes** — just update the contract address.
 
 ## Build
 
@@ -27,7 +27,7 @@ near contract deploy price-oracle-pyth.testnet \
 ```
 
 Parameters:
-- `oracle_contract_id` — Oracle-Ark contract to read prices from
+- `oracle_contract_id` — Oracle Example contract to read prices from
 - `stale_threshold` — max age of prices in seconds (60 = prices older than 60s return `null`)
 
 The contract initializes with default mainnet price feed mappings (NEAR, ETH, BTC, USDT, USDC). You can add/remove mappings after deployment.
@@ -42,7 +42,7 @@ near send OWNER price-oracle-pyth.testnet 1 --networkId testnet
 
 ## Configure Price Mappings
 
-Link Pyth price feed IDs to Oracle-Ark asset IDs:
+Link Pyth price feed IDs to Oracle Example asset IDs:
 
 ```bash
 # NEAR/USD
@@ -86,7 +86,7 @@ near call price-oracle-pyth.testnet remove_price_mapping '{
 
 ## Refresh Prices
 
-Trigger Oracle-Ark to fetch fresh prices and send them to the wrapper via `oracle_on_call` callback:
+Trigger Oracle Example to fetch fresh prices and send them to the wrapper via `oracle_on_call` callback:
 
 ```bash
 near call price-oracle-pyth.testnet refresh_prices '{}' \
@@ -114,7 +114,7 @@ near view price-oracle-pyth.testnet get_price_no_older_than '{
   "age": 30
 }' --networkId testnet
 
-# EMA price (same as get_price — Oracle-Ark has no separate EMA)
+# EMA price (same as get_price — Oracle Example has no separate EMA)
 near view price-oracle-pyth.testnet get_ema_price '{
   "price_id": "ff61491a931112ddf1bd8147cd1b641375f79f5825126d665480874634fd0ace"
 }' --networkId testnet
@@ -149,7 +149,7 @@ near view price-oracle-pyth.testnet get_stale_threshold --networkId testnet
 
 Actual USD price = `price * 10^expo` = `450000000 * 10^(-8)` = **$4.50**
 
-`conf` is always 0 (Oracle-Ark provides a single aggregated price, no confidence interval).
+`conf` is always 0 (Oracle Example provides a single aggregated price, no confidence interval).
 
 ## Pyth-Compatible Mutating Methods
 
@@ -223,7 +223,7 @@ If your protocol attaches the Pyth fee estimate before calling `update_price_fee
 
 **4. Price freshness model is different.**
 
-| | Pyth | Oracle-Ark Wrapper |
+| | Pyth | Oracle Example Wrapper |
 |---|---|---|
 | Price source | Wormhole VAA push from off-chain | OutLayer WASI fetches from exchanges |
 | Update trigger | Caller must push VAA via `update_price_feeds` | Scheduler / anyone calls `refresh_prices` |
@@ -232,7 +232,7 @@ If your protocol attaches the Pyth fee estimate before calling `update_price_fee
 
 **5. Fund the wrapper contract.**
 
-The wrapper needs NEAR balance to pay for oracle calls. Send NEAR to the wrapper contract so it can call Oracle-Ark:
+The wrapper needs NEAR balance to pay for oracle calls. Send NEAR to the wrapper contract so it can call Oracle Example:
 
 ```bash
 near send FUNDER price-oracle-pyth.testnet 5 --networkId testnet
@@ -242,7 +242,7 @@ Each `refresh_prices` / `update_price_feeds` call costs ~0.02 NEAR from the wrap
 
 ## Known Price Feed IDs
 
-| Asset    | Pyth Price ID                                                      | Oracle-Ark asset_id                                        |
+| Asset    | Pyth Price ID                                                      | Oracle Example asset_id                                        |
 |----------|--------------------------------------------------------------------|------------------------------------------------------------|
 | NEAR/USD | `c415de8d2efa7db216527dff4b60e8f3a5311c740dadb233e13e12547e226750` | `wrap.near`                                                |
 | ETH/USD  | `ff61491a931112ddf1bd8147cd1b641375f79f5825126d665480874634fd0ace` | `aurora`                                                   |

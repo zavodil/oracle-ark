@@ -21,7 +21,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// Some providers reject requests without a descriptive User-Agent — CoinGecko answers HTTP 403
 /// ("Please add a descriptive User-Agent to your request"). The WASI HTTP client sends none by
 /// default, so every outbound request sets one explicitly.
-pub const USER_AGENT: &str = "oracle-ark/1.0 (+https://github.com/zavodil/oracle-ark)";
+pub const USER_AGENT: &str = "oracle-example/1.0 (+https://github.com/out-layer/oracle-example)";
 
 /// WASI-only: the async (scheduler) build drives reqwest, which carries its own 30s total
 /// timeout set where the client is built.
@@ -473,7 +473,7 @@ pub mod sync {
     /// It used to attach `Authorization: Bearer $API_KEY` to every request. The URL is chosen
     /// by the caller and `API_KEY` is a credential the enclave holds on OUR behalf (CoinGecko
     /// Pro, Alchemy), so one call naming `https://attacker.tld/` handed that credential over.
-    /// The twin in the `oracle-ark` binary answers this with a host allowlist; here the header
+    /// The twin in the `oracle-example` binary answers this with a host allowlist; here the header
     /// is simply gone, and there is no `api_key` parameter to pass one in. A custom source
     /// that needs authentication carries its own credential in `config.headers`, where the
     /// caller is spending their own secret rather than ours.
@@ -1088,7 +1088,7 @@ pub mod sync {
 
         /// `fetch_custom` refuses a blocked destination itself, before it builds a request.
         ///
-        /// The guard used to live only in the `oracle-ark` binary's copy of this code, so this
+        /// The guard used to live only in the `oracle-example` binary's copy of this code, so this
         /// `pub fn` would have connected to any of these. No network is touched by this test:
         /// validation runs first and returns, which is exactly the property being pinned.
         ///

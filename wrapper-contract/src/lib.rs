@@ -9,7 +9,7 @@ const ORACLE_CALL_DEPOSIT: NearToken = NearToken::from_millinear(20);
 /// Price precision: 8 decimals (same as oracle contract)
 const PRICE_DECIMALS: u8 = 8;
 
-/// Price type matching oracle-ark/contract
+/// Price type matching oracle-example/contract
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(crate = "near_sdk::serde")]
 pub struct Price {

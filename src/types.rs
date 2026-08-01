@@ -215,7 +215,7 @@ pub enum ExternalPriceSource {
     Pyth,
     /// Custom source - fetch from any URL with JSON path extraction
     /// The API_KEY secret is attached only for allowlisted providers (see
-    /// `oracle_ark_sources::security::may_receive_api_key`); any other source must carry its
+    /// `oracle_example_sources::security::may_receive_api_key`); any other source must carry its
     /// own credential in `headers`
     Custom(CustomSourceConfig),
 }

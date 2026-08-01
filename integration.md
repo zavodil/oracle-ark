@@ -1,6 +1,6 @@
-# Oracle-Ark Integration Guide
+# Oracle Example Integration Guide
 
-How to integrate Oracle-Ark price oracle into your NEAR contract or dApp.
+How to integrate Oracle Example price oracle into your NEAR contract or dApp.
 
 **Contract addresses:**
 - Mainnet: `price-oracle.near`

@@ -1,12 +1,12 @@
 # Pyth-Compatible Wrapper Contract — Technical Specification
 
-> **Legacy / optional.** This standalone wrapper contract is now legacy. The main Oracle-Ark contract `price-oracle.near` implements the Pyth receiver API **natively** (see `../contract/src/pyth.rs`). **Use the native Pyth methods on `price-oracle.near` unless you specifically need a separate contract address.**
+> **Legacy / optional.** This standalone wrapper contract is now legacy. The main Oracle Example contract `price-oracle.near` implements the Pyth receiver API **natively** (see `../contract/src/pyth.rs`). **Use the native Pyth methods on `price-oracle.near` unless you specifically need a separate contract address.**
 >
 > One behavioral difference: the native contract's `get_ema_price` returns a real EMA, whereas **this** wrapper's `get_ema_price` just returns the spot price (see this crate's `src/lib.rs`). Native Pyth price-feed mappings are managed via council actions `AddPriceMapping` / `RemovePriceMapping` / `SetPythStaleThreshold`.
 
-NEAR smart contract that implements the same public API as the Pyth receiver contract (`pyth-oracle.near`), but internally uses Oracle-Ark (`price-oracle.near`) for price data.
+NEAR smart contract that implements the same public API as the Pyth receiver contract (`pyth-oracle.near`), but internally uses Oracle Example (`price-oracle.near`) for price data.
 
-This enables existing DeFi protocols using Pyth to switch to Oracle-Ark with **minimal code changes** — update the contract address and adjust the deposit model (see [Migration Guide](#migration-guide-for-defi-protocols)).
+This enables existing DeFi protocols using Pyth to switch to Oracle Example with **minimal code changes** — update the contract address and adjust the deposit model (see [Migration Guide](#migration-guide-for-defi-protocols)).
 
 ## Pyth Receiver Contract Interface (source of truth)
 
@@ -76,7 +76,7 @@ fn list_prices_no_older_than(&self, price_ids: Vec<PriceIdentifier>) -> HashMap<
 
 ```rust
 /// Update price feeds. In Pyth this accepts Wormhole VAA data.
-/// In our wrapper, this is a NO-OP or triggers an oracle-ark update.
+/// In our wrapper, this is a NO-OP or triggers an oracle-example update.
 pub fn update_price_feeds(&mut self, _data: String);
 
 /// Estimate fee for update. In Pyth this returns deposit needed for update_price_feeds.
@@ -89,14 +89,14 @@ fn get_update_fee_estimate(&self, data: String) -> U128;
 
 ```rust
 pub struct PythWrapper {
-    /// Oracle-Ark contract to read prices from
+    /// Oracle Example contract to read prices from
     oracle_contract_id: AccountId,
 
-    /// Mapping: Pyth PriceIdentifier (hex) -> Oracle-Ark asset_id
+    /// Mapping: Pyth PriceIdentifier (hex) -> Oracle Example asset_id
     /// Example: "f9c0172ba10d..." -> "wrap.near"
     price_id_to_asset: UnorderedMap<String, String>,
 
-    /// Reverse mapping: Oracle-Ark asset_id -> Pyth PriceIdentifier (hex)
+    /// Reverse mapping: Oracle Example asset_id -> Pyth PriceIdentifier (hex)
     asset_to_price_id: UnorderedMap<String, String>,
 
     /// Staleness threshold in seconds (matches Pyth default behavior)
@@ -109,7 +109,7 @@ pub struct PythWrapper {
 
 ### Price Conversion Logic
 
-Oracle-Ark price format:
+Oracle Example price format:
 ```
 Price { multiplier: 500000000, decimals: 8 }  // = $5.00
 ```
@@ -121,10 +121,10 @@ Price { price: 500000000, conf: 0, expo: -8, publish_time: 1706900000 }
 
 Conversion:
 ```rust
-fn oracle_ark_to_pyth(multiplier: u128, decimals: u8, timestamp: u64) -> pyth::Price {
+fn oracle_example_to_pyth(multiplier: u128, decimals: u8, timestamp: u64) -> pyth::Price {
     pyth::Price {
-        price: multiplier as i64,    // Oracle-Ark prices are always positive
-        conf: 0,                      // No confidence data from Oracle-Ark (single aggregated price)
+        price: multiplier as i64,    // Oracle Example prices are always positive
+        conf: 0,                      // No confidence data from Oracle Example (single aggregated price)
         expo: -(decimals as i32),     // decimals=8 -> expo=-8
         publish_time: (timestamp / 1_000_000_000) as i64,  // nano -> seconds (if needed)
     }
@@ -134,21 +134,21 @@ fn oracle_ark_to_pyth(multiplier: u128, decimals: u8, timestamp: u64) -> pyth::P
 ### Method Implementation
 
 **View methods** (`get_price`, `get_price_unsafe`, `get_price_no_older_than`, etc.):
-1. Look up `price_id_to_asset` to find the Oracle-Ark asset_id
-2. Call `get_price_data` (view) on Oracle-Ark contract to get cached price
-3. Convert Oracle-Ark `Price` -> Pyth `Price`
+1. Look up `price_id_to_asset` to find the Oracle Example asset_id
+2. Call `get_price_data` (view) on Oracle Example contract to get cached price
+3. Convert Oracle Example `Price` -> Pyth `Price`
 4. Apply staleness check if needed
 
-**Important**: View methods can only call other view methods. `get_price_data` on Oracle-Ark IS a view method, so this works. But NEAR view calls cannot do cross-contract view calls (no `ext_contract` in view context). Therefore:
+**Important**: View methods can only call other view methods. `get_price_data` on Oracle Example IS a view method, so this works. But NEAR view calls cannot do cross-contract view calls (no `ext_contract` in view context). Therefore:
 - **Option A**: Replicate prices into wrapper state via scheduler/callback, then serve from local state (preferred — instant, no cross-contract)
-- **Option B**: Read from Oracle-Ark public storage directly (via HTTPS from frontend, not from contract)
+- **Option B**: Read from Oracle Example public storage directly (via HTTPS from frontend, not from contract)
 
-**Recommended: Option A** — Wrapper stores its own price cache, updated via callback from Oracle-Ark.
+**Recommended: Option A** — Wrapper stores its own price cache, updated via callback from Oracle Example.
 
 ### Flow: How Prices Get Into the Wrapper
 
 ```
-Oracle-Ark contract (price-oracle.near)
+Oracle Example contract (price-oracle.near)
     │
     │  oracle_call(receiver_id=price-oracle-pyth.near, asset_ids=["wrap.near", ...])
     │
@@ -168,14 +168,14 @@ Zero code changes needed in DeFi protocol
 ```
 
 Update can be triggered by:
-1. **Scheduler** (same as Oracle-Ark scheduler) calling `refresh_prices()` on wrapper
+1. **Scheduler** (same as Oracle Example scheduler) calling `refresh_prices()` on wrapper
 2. **Anyone** calling `refresh_prices()` (wrapper calls oracle_call internally, pays from its balance)
-3. **Oracle-Ark contract** calling `oracle_on_call` as a callback
+3. **Oracle Example contract** calling `oracle_on_call` as a callback
 
 ### Admin Methods
 
 ```rust
-/// Add mapping: Pyth price_id <-> Oracle-Ark asset_id
+/// Add mapping: Pyth price_id <-> Oracle Example asset_id
 fn add_price_mapping(&mut self, price_id_hex: String, asset_id: String);
 
 /// Remove mapping
@@ -187,7 +187,7 @@ fn set_stale_threshold(&mut self, threshold_sec: u64);
 /// Set oracle contract ID
 fn set_oracle_contract_id(&mut self, contract_id: AccountId);
 
-/// Trigger a price refresh from Oracle-Ark
+/// Trigger a price refresh from Oracle Example
 fn refresh_prices(&mut self) -> Promise;
 ```
 
@@ -196,7 +196,7 @@ fn refresh_prices(&mut self) -> Promise;
 In real Pyth, this method accepts Wormhole VAA data and updates prices on-chain. In our wrapper:
 - Accept the call (don't reject it — protocols may call it as part of their flow)
 - Ignore the `data` parameter (we don't parse Wormhole VAAs)
-- Optionally trigger a `refresh_prices()` from Oracle-Ark
+- Optionally trigger a `refresh_prices()` from Oracle Example
 - Return success
 
 This ensures protocols that call `update_price_feeds` before `get_price` (standard Pyth pattern) still work.
@@ -205,13 +205,13 @@ This ensures protocols that call `update_price_feeds` before `get_price` (standa
 
 In real Pyth, returns the deposit needed for `update_price_feeds`. In our wrapper:
 - Return `U128(0)` or a minimal amount (1 yoctoNEAR)
-- Oracle-Ark prices are already on-chain, no expensive update needed
+- Oracle Example prices are already on-chain, no expensive update needed
 
 ## Known Price Feed IDs
 
 Common Pyth price feed IDs on NEAR (without `0x` prefix):
 
-| Asset | Pyth Price ID | Oracle-Ark asset_id |
+| Asset | Pyth Price ID | Oracle Example asset_id |
 |-------|--------------|---------------------|
 | BTC/USD | `e62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43` | `nbtc.bridge.near` |
 | ETH/USD | `ff61491a931112ddf1bd8147cd1b641375f79f5825126d665480874634fd0ace` | `aurora` |
@@ -224,7 +224,7 @@ Full list: https://www.pyth.network/developers/price-feed-ids
 ## File Structure
 
 ```
-wasi-examples/oracle-ark/pyth-compatible-wrapper/
+oracle-example/pyth-compatible-wrapper/
 ├── SPEC.md              (this file)
 ├── Cargo.toml
 ├── rust-toolchain.toml  (channel = "1.85.0")
@@ -294,7 +294,7 @@ For a protocol currently using `pyth-oracle.near`:
 
 ### Key Differences from Pyth
 
-| | Pyth | Oracle-Ark Wrapper |
+| | Pyth | Oracle Example Wrapper |
 |---|---|---|
 | Price source | Wormhole VAA push from off-chain | OutLayer WASI fetches from exchanges |
 | Update trigger | Caller must push VAA via `update_price_feeds` | Scheduler / anyone calls `refresh_prices` |
@@ -309,7 +309,7 @@ For a protocol currently using `pyth-oracle.near`:
 
 ### `update_price_feeds` — behavior change
 
-In Pyth, the caller pays a small Wormhole fee and pushes fresh price data on-chain. In the wrapper, `update_price_feeds` accepts the call (so protocols that call it as part of their flow don't break), ignores the VAA data, and triggers an Oracle-Ark refresh. The ~0.02 NEAR cost is paid by the wrapper contract from its own balance, not by the caller.
+In Pyth, the caller pays a small Wormhole fee and pushes fresh price data on-chain. In the wrapper, `update_price_feeds` accepts the call (so protocols that call it as part of their flow don't break), ignores the VAA data, and triggers an Oracle Example refresh. The ~0.02 NEAR cost is paid by the wrapper contract from its own balance, not by the caller.
 
 ## References
 

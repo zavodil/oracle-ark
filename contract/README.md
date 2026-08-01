@@ -1,4 +1,4 @@
-# Oracle-Ark Contract
+# Oracle Example Contract
 
 TEE-secured price oracle that **recreates the interface** of the original [NEAR Native Price Oracle](https://github.com/NearDeFi/price-oracle) (`priceoracle.near`) with enhancements:
 - TEE-verified prices via [OutLayer](https://outlayer.fastnear.com) (Intel TDX)
@@ -31,7 +31,7 @@ These methods are fully backward-compatible with `priceoracle.near`:
 
 Existing integrations with `priceoracle.near` work without code changes (only update the contract address).
 
-## New Methods (Oracle-Ark Only)
+## New Methods (Oracle Example Only)
 
 | Method | Type | Description |
 |--------|------|-------------|

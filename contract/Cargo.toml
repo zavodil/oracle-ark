@@ -3,6 +3,7 @@ name = "price-oracle"
 version = "0.7.0"
 authors = ["Vadim Ilin <vadim@fastnear.com>"]
 edition = "2021"
+license = "MIT OR Apache-2.0"
 
 [package.metadata.near.build]
 wasm-opt-args = ["--enable-bulk-memory"]

@@ -96,7 +96,7 @@ export default function HomePage() {
                 Read Docs
               </Link>
               <a
-                href="https://github.com/zavodil/oracle-ark"
+                href="https://github.com/out-layer/oracle-example"
                 target="_blank"
                 rel="noopener noreferrer"
                 className="btn btn-secondary text-lg px-8 py-3"
@@ -414,7 +414,7 @@ ext_outlayer::ext("outlayer.near".parse().unwrap())
             </div>
             <div className="flex space-x-6 text-sm">
               <a
-                href="https://github.com/zavodil/oracle-ark"
+                href="https://github.com/out-layer/oracle-example"
                 target="_blank"
                 rel="noopener noreferrer"
                 className="text-dark-400 hover:text-white"

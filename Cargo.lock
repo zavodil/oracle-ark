@@ -430,7 +430,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "42f5e15c9953c5e4ccceeb2e7382a716482c34515315f7b03532b8b4e8393d2d"
 
 [[package]]
-name = "oracle-ark"
+name = "oracle-example"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -439,7 +439,7 @@ dependencies = [
  "bs58",
  "ed25519-dalek",
  "hex",
- "oracle-ark-sources",
+ "oracle-example-sources",
  "outlayer",
  "serde",
  "serde_json",
@@ -448,7 +448,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "oracle-ark-sources"
+name = "oracle-example-sources"
 version = "0.1.0"
 dependencies = [
  "anyhow",

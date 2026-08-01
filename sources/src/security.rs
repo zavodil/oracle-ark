@@ -1,8 +1,8 @@
 //! Guards for the one URL a caller gets to choose: the custom source.
 //!
-//! This module lives in the SHARED crate, not in the `oracle-ark` binary where it started,
-//! because both crates fetch caller-supplied URLs: `oracle-ark`'s `fetch_custom_raw` and
-//! `oracle_ark_sources::sources::sync::fetch_custom`. The second one had no validation at all
+//! This module lives in the SHARED crate, not in the `oracle-example` binary where it started,
+//! because both crates fetch caller-supplied URLs: `oracle-example`'s `fetch_custom_raw` and
+//! `oracle_example_sources::sources::sync::fetch_custom`. The second one had no validation at all
 //! while the first did, which is what a second copy of a security check always degrades into —
 //! one copy gets fixed and the other keeps the hole. There is exactly one implementation here,
 //! it is not feature-gated, and its tests run with the crate's default features.

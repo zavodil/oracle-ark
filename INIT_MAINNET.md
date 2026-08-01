@@ -8,7 +8,7 @@ Owner: `owner.price-oracle.near`
 ## 1. Build
 
 ```bash
-cd wasi-examples/oracle-ark/contract
+cd oracle-example/contract
 cargo near build
 ```
 
@@ -49,10 +49,15 @@ near call price-oracle.near create_proposal '{"action": {
   "action": "configure_outlayer",
   "outlayer_contract_id": "outlayer.near",
   "code_source": "{\"Project\":{\"project_id\":\"price-oracle.near/price-oracle\"}}",
-  "secrets_profile": "default",
+  "secrets_profile": "oracle",
   "secrets_account_id": "price-oracle.near"
 }}' --accountId owner.price-oracle.near --deposit 0.1 --networkId mainnet
 ```
+
+Both secrets fields are optional on the contract. The live `price-oracle.near` currently has them
+unset, which means contract-initiated OutLayer calls carry no `secrets_ref`; the scheduler supplies
+its own via `SECRETS_PROFILE`/`SECRETS_ACCOUNT_ID`. Set them here only if you want the contract
+itself to trigger executions that need secrets.
 
 ## 6. Add all assets
 
@@ -77,7 +82,7 @@ near call price-oracle.near create_proposals '{"actions": [
 
 # UPLOAD WASM TO FASTFS
 
-python3 upload_wasm_fastfs.py ../wasi-examples/oracle-ark/oracle-ark.wasm ../worker/.env.mainnet.worker1
+python3 upload_wasm_fastfs.py ../oracle-example/oracle-example.wasm ../worker/.env.mainnet.worker1
 
 UPLOAD FILE TO OUTLAYER PROJECT
 
@@ -157,7 +162,7 @@ compiled `tokens.json` — no WASM rebuild needed when adding tokens/exchanges.
 Build and upload the new WASM, then create an upgrade proposal with migration:
 
 ```bash
-cd wasi-examples/oracle-ark/contract
+cd oracle-example/contract
 cargo near build
 
 # Upload code
@@ -212,7 +217,7 @@ near call price-oracle.near create_proposal '{"action": {
 Upload the new WASM that reads config from storage instead of compiled `tokens.json`.
 
 ```bash
-cd wasi-examples/oracle-ark
+cd oracle-example
 cargo build --target wasm32-wasip2 --release
 # Upload to FastFS / OutLayer project
 ```

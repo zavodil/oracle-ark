@@ -1,8 +1,9 @@
 [package]
-name = "oracle-ark-sources"
+name = "oracle-example-sources"
 version = "0.1.0"
 edition = "2021"
-description = "Shared price sources for oracle-ark (WASI and scheduler)"
+license = "MIT OR Apache-2.0"
+description = "Shared price sources for oracle-example (WASI and scheduler)"
 
 [features]
 default = []

@@ -56,7 +56,7 @@ export default function DocsPage() {
             </ul>
             <div className="mt-8 pt-8 border-t border-dark-800">
               <a
-                href="https://github.com/zavodil/oracle-ark"
+                href="https://github.com/out-layer/oracle-example"
                 target="_blank"
                 rel="noopener noreferrer"
                 className="text-dark-400 hover:text-white text-sm flex items-center"
@@ -852,7 +852,7 @@ repeated per entry:
 {`// Before (Pyth)
 const ORACLE: &str = "pyth-oracle.near";
 
-// After (Oracle-Ark) — no other changes needed!
+// After (Oracle Example) — no other changes needed!
 const ORACLE: &str = "price-oracle.near";`}
                 </code>
               </pre>
@@ -863,7 +863,7 @@ const ORACLE: &str = "price-oracle.near";`}
 {`// PythPrice format (same as pyth-oracle.near)
 {
   "price": 525000000,      // price * 10^|expo|
-  "conf": 0,               // confidence (always 0 for Oracle-Ark)
+  "conf": 0,               // confidence (always 0 for Oracle Example)
   "expo": -8,              // exponent: actual_price = price * 10^expo
   "publish_time": 1706900000  // unix timestamp (seconds)
 }
@@ -1005,7 +1005,7 @@ or go direct for full customization.`}
                       <li>For price fetching, it&apos;s easier to use <code className="text-primary">price-oracle.near</code> — it handles WASI configuration for you</li>
                       <li>Direct integration is best for custom data sources or when you need full control</li>
                       <li>See{' '}
-                        <a href="https://github.com/zavodil/oracle-ark/tree/main/contract" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">
+                        <a href="https://github.com/out-layer/oracle-example/tree/main/contract" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">
                           price-oracle contract source
                         </a>
                         {' '}for a complete example
@@ -1179,7 +1179,7 @@ pub fn oracle_on_call(
               <p className="text-dark-300 mb-6">
                 Contract: <code className="text-primary">price-oracle-wrapper.near</code> |{' '}
                 <a
-                  href="https://github.com/zavodil/oracle-ark/tree/main/wrapper-contract"
+                  href="https://github.com/out-layer/oracle-example/tree/main/wrapper-contract"
                   target="_blank"
                   rel="noopener noreferrer"
                   className="text-primary hover:underline"

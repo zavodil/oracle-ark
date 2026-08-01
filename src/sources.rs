@@ -1,23 +1,23 @@
 //! Custom source fetching for fetch_external command
 //!
-//! Standard sources (CoinGecko, Binance, Pyth) use the shared oracle-ark-sources crate.
+//! Standard sources (CoinGecko, Binance, Pyth) use the shared oracle-example-sources crate.
 //! This module only handles Custom sources which need special JSON path extraction.
 
 use crate::types::CustomSourceConfig;
-// The SSRF guard and the API_KEY allowlist live in `oracle-ark-sources` so that this path and
-// `oracle_ark_sources::sources::sync::fetch_custom` cannot drift apart — see that module.
-use oracle_ark_sources::security;
+// The SSRF guard and the API_KEY allowlist live in `oracle-example-sources` so that this path and
+// `oracle_example_sources::sources::sync::fetch_custom` cannot drift apart — see that module.
+use oracle_example_sources::security;
 use std::env;
 use std::error::Error;
 use std::time::Duration;
 use wasi_http_client::Client;
 
-/// Connect timeout for custom-source requests. See the note in `oracle-ark-sources`: the client
+/// Connect timeout for custom-source requests. See the note in `oracle-example-sources`: the client
 /// offers no read/total timeout, so this only bounds the connect phase; a stalled-after-connect
 /// server is bounded by the WASI call's `max_execution_seconds`.
-/// See `oracle_ark_sources::sources::USER_AGENT` — providers such as CoinGecko
+/// See `oracle_example_sources::sources::USER_AGENT` — providers such as CoinGecko
 /// reject requests that carry no User-Agent.
-const USER_AGENT: &str = "oracle-ark/1.0 (+https://github.com/zavodil/oracle-ark)";
+const USER_AGENT: &str = "oracle-example/1.0 (+https://github.com/out-layer/oracle-example)";
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 

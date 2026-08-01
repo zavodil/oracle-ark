@@ -2,6 +2,7 @@
 name = "oracle-scheduler"
 version = "0.1.0"
 edition = "2021"
+license = "MIT OR Apache-2.0"
 description = "Scheduler for proactive oracle price updates via OutLayer WASI"
 
 [[bin]]
@@ -21,7 +22,7 @@ base64 = "0.22"
 futures = "0.3"
 
 # Shared sources library
-oracle-ark-sources = { path = "../sources", features = ["async"] }
+oracle-example-sources = { path = "../sources", features = ["async"] }
 
 [profile.release]
 opt-level = "s"

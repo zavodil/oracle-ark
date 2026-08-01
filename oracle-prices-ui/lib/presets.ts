@@ -217,7 +217,7 @@ export const CUSTOM_DATA_PRESETS: Preset[] = [
               json_path: 'stargazers_count',
               value_type: 'number',
               method: 'GET',
-              headers: [['User-Agent', 'Oracle-Ark/1.0']],
+              headers: [['User-Agent', 'Oracle Example/1.0']],
             },
           },
         },

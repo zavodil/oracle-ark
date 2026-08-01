@@ -1,12 +1,12 @@
 # TEE-Secured Price Oracle
 
-> **[Full documentation](https://outlayer.fastnear.com/docs/examples#oracle-ark)** on the OutLayer dashboard.
+> **[Full documentation](https://outlayer.fastnear.com/docs/examples#oracle-example)** on the OutLayer dashboard.
 
 **On-Demand Oracle with Sustainable Economics**
 
 Based on [OutLayer](https://outlayer.fastnear.com) — verifiable off-chain computation for NEAR Protocol.
 
-[Dashboard & Playground](https://price-oracle.outlayer.ai/) | [GitHub](https://github.com/zavodil/oracle-ark)
+[Dashboard & Playground](https://price-oracle.outlayer.ai/) | [GitHub](https://github.com/out-layer/oracle-example)
 
 ---
 
@@ -137,6 +137,17 @@ each record are what a consumer should actually read. See [SOURCES.md](SOURCES.m
 **OutLayer Project ID:**
 - Mainnet: `price-oracle.near/price-oracle`
 - Testnet: `zavodil2.testnet/price-oracle`
+
+The production oracle is invoked **through the project**, not through this GitHub repository: calls
+go to `POST /call/{owner}/{project}` (or on-chain with a
+`{"Project": {"project_id": "price-oracle.near/price-oracle"}}` code source), and OutLayer resolves
+both the WASM and the secrets from the project. The mainnet secrets reference is
+`{"profile": "oracle", "account_id": "price-oracle.near"}` — a profile name and an account, not a
+secret; the values themselves stay encrypted on-chain and are decrypted only inside the TEE.
+
+This matters when reading the examples below: anything that declares a `GitHub` code source binds
+its secrets to `github.com/owner/repo`, so a fork or a rename needs its secrets re-registered. The
+project path has no such coupling.
 
 **Dashboard:** https://price-oracle.outlayer.ai/
 - Live prices display
@@ -371,7 +382,7 @@ This returns 1-hour EMA for NEAR.
 ```rust
 struct Price {
     price: i64,        // Price value
-    conf: u64,         // Confidence interval (always 0 for Oracle-Ark)
+    conf: u64,         // Confidence interval (always 0 for Oracle Example)
     expo: i32,         // Exponent (usually -8)
     publish_time: i64, // Unix timestamp (seconds)
 }
@@ -395,7 +406,7 @@ struct Price {
 // Before (Pyth)
 const ORACLE: &str = "pyth-oracle.near";
 
-// After (Oracle-Ark) — no other changes needed!
+// After (Oracle Example) — no other changes needed!
 const ORACLE: &str = "price-oracle-pyth.near";
 ```
 
@@ -416,7 +427,7 @@ Create custom data feeds using OutLayer's WASI infrastructure.
 
 ### Prerequisites
 
-1. Read [WASI_TUTORIAL.md](../WASI_TUTORIAL.md)
+1. Read [WASI_TUTORIAL.md](https://github.com/fastnear/near-outlayer/blob/main/wasi-examples/WASI_TUTORIAL.md)
 2. Familiarity with Rust and WASI
 
 ### Project Structure
@@ -541,7 +552,7 @@ near view price-oracle.near can_subsidize_outlayer_calls
 ## Project Structure
 
 ```
-oracle-ark/
+oracle-example/
 ├── src/                        # WASI worker source
 ├── contract/                   # Main price oracle contract
 ├── wrapper-contract/           # Simple wrapper example
@@ -558,14 +569,14 @@ oracle-ark/
 ## Links
 
 - **Dashboard & Playground & Docs:** https://price-oracle.outlayer.ai/
-- **GitHub:** https://github.com/zavodil/oracle-ark
+- **GitHub:** https://github.com/out-layer/oracle-example
 - **OutLayer Platform:** https://outlayer.fastnear.com/dashboard
 - **Integration Guide:** [integration.md](integration.md)
 - **SDK Reference:** [sdk.md](sdk.md)
-- **WASI Tutorial:** [WASI_TUTORIAL.md](../WASI_TUTORIAL.md)
+- **WASI Tutorial:** [WASI_TUTORIAL.md](https://github.com/fastnear/near-outlayer/blob/main/wasi-examples/WASI_TUTORIAL.md)
 
 ---
 
 ## License
 
-MIT
+MIT OR Apache-2.0, at your option — see `LICENSE-MIT` and `LICENSE-APACHE`.

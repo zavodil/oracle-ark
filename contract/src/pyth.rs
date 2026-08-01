@@ -9,9 +9,9 @@ use std::collections::HashMap;
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(crate = "near_sdk::serde")]
 pub struct PythPrice {
-    /// Price value (signed). Same as Oracle-Ark multiplier.
+    /// Price value (signed). Same as Oracle Example multiplier.
     pub price: i64,
-    /// Confidence interval. Always 0 for Oracle-Ark (single aggregated price).
+    /// Confidence interval. Always 0 for Oracle Example (single aggregated price).
     pub conf: u64,
     /// Exponent: actual_price = price * 10^expo. Equals -(decimals).
     pub expo: i32,
@@ -115,7 +115,7 @@ impl Contract {
             .collect()
     }
 
-    /// Look up the Oracle-Ark asset_id for a given Pyth price_id.
+    /// Look up the Oracle Example asset_id for a given Pyth price_id.
     pub fn get_price_mapping(&self, price_id_hex: String) -> Option<String> {
         self.pyth_price_id_to_asset.get(&price_id_hex)
     }

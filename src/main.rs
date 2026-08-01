@@ -5,9 +5,9 @@ mod storage_types;
 mod telegram;
 mod types;
 
-use oracle_ark_sources::parsers;
-use oracle_ark_sources::sources::sync as shared_sources;
-use oracle_ark_sources::{ExchangeConfig, SourcePrice};
+use oracle_example_sources::parsers;
+use oracle_example_sources::sources::sync as shared_sources;
+use oracle_example_sources::{ExchangeConfig, SourcePrice};
 use outlayer::storage;
 use storage_types::{SourceInfo, StoredPrice};
 use types::*;
@@ -308,7 +308,7 @@ fn handle_update_prices(
     }
 
     // Alert if Chainlink was disabled during this run (all RPCs failed)
-    if oracle_ark_sources::CHAINLINK_DISABLED.load(std::sync::atomic::Ordering::Relaxed) {
+    if oracle_example_sources::CHAINLINK_DISABLED.load(std::sync::atomic::Ordering::Relaxed) {
         telegram::send_alert(
             "Chainlink Disabled",
             "All Chainlink Ethereum RPCs failed. Chainlink source disabled for this run.\nPrices still available from other sources.",
@@ -1175,7 +1175,7 @@ fn handle_force_update(
 /// API_KEY secret (if configured in OutLayer) is used for authentication:
 /// - CoinGecko: passed as x_cg_pro_api_key query param
 /// - Custom: added as Authorization: Bearer header, but only for the hosts in
-///   `oracle_ark_sources::security::API_KEY_HOSTS` — the URL is caller-supplied
+///   `oracle_example_sources::security::API_KEY_HOSTS` — the URL is caller-supplied
 fn handle_fetch_external(token_id: &str, source: &ExternalPriceSource) -> ExternalPriceResponse {
     // Universal API_KEY - works for all sources that need authentication
     let api_key = env::var("API_KEY").ok();
@@ -1231,7 +1231,7 @@ fn handle_fetch_external(token_id: &str, source: &ExternalPriceSource) -> Extern
 }
 
 /// Fetch price from multiple sources and store in public storage
-/// Uses shared oracle-ark-sources crate for consistency with scheduler
+/// Uses shared oracle-example-sources crate for consistency with scheduler
 fn fetch_and_store_price(
     token: &str,
     config: &ExchangeConfig,

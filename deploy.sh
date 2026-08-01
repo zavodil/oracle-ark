@@ -12,7 +12,7 @@ SCRIPTS_DIR="../../scripts"
 
 # WASI build output
 WASI_TARGET="wasm32-wasip2"
-WASI_BINARY_NAME="oracle-ark"
+WASI_BINARY_NAME="oracle-example"
 
 # Contract build output
 CONTRACT_WASM="res/price_oracle.wasm"

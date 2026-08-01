@@ -1,4 +1,4 @@
-# Oracle-Ark Scheduler
+# Oracle Example Scheduler
 
 Background service that keeps TEE worker prices fresh by monitoring external price sources and triggering WASI updates when needed.
 
@@ -118,6 +118,34 @@ The push is deliberately **decoupled from the cache refresh**: it runs on its ow
 
 Setting `UPDATE_CONTRACT_ENABLED=true` also **requires** `ORACLE_CONTRACT_ID` plus `SECRETS_PROFILE` and `SECRETS_ACCOUNT_ID`. Without these, the WASI binary runs without the `PROTECTED_` signing keys and no on-chain push happens (public storage is still updated).
 
+### How the secrets are bound
+
+The scheduler calls `POST /call/{PROJECT_OWNER}/{PROJECT_NAME}`, so OutLayer resolves the code
+through the **project**, not through a GitHub URL. Secrets follow the same path: the worker builds a
+`Project { project_id }` accessor from the project the call was made against and asks the keystore
+for that profile.
+
+The production deployment therefore runs as:
+
+```env
+PROJECT_OWNER=price-oracle.near
+PROJECT_NAME=price-oracle
+SECRETS_PROFILE=oracle
+SECRETS_ACCOUNT_ID=price-oracle.near
+```
+
+Two consequences worth knowing:
+
+- **Renaming, forking or moving the GitHub repository does not invalidate these secrets.** Nothing in
+  the lookup is a repo string. Only `request_execution` calls that declare a `GitHub` code source
+  bind secrets to `github.com/owner/repo`, and those break when the repo is renamed.
+- The profile name is not `default` here. `SECRETS_PROFILE` selects a named profile under
+  `SECRETS_ACCOUNT_ID`, and *all* secrets in that profile are injected into the WASI environment, so
+  a wrong profile name fails as "missing `PROTECTED_` key" rather than as an access error.
+
+`SECRETS_PROFILE`/`SECRETS_ACCOUNT_ID` name a profile and an account. Neither is itself a secret —
+the secret values live encrypted on-chain and are only ever decrypted inside the TEE.
+
 ## Setup
 
 ### 1. Copy environment file
@@ -134,7 +162,7 @@ COORDINATOR_URL=https://api.outlayer.fastnear.com
 
 # Project identification
 PROJECT_OWNER=alice.near
-PROJECT_NAME=oracle-ark
+PROJECT_NAME=price-oracle
 PROJECT_UUID=p0000000000000001
 
 # Payment key for WASI calls (create via OutLayer dashboard)

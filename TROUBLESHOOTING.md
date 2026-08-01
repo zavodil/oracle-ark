@@ -1,4 +1,4 @@
-# Oracle-Ark Troubleshooting Guide
+# Oracle Example Troubleshooting Guide
 
 Operational runbook for diagnosing and fixing common issues.
 
@@ -238,7 +238,7 @@ near call price-oracle.testnet create_proposal '{
   "action": {
     "action": "configure_outlayer",
     "outlayer_contract_id": "outlayer.testnet",
-    "code_source": "{\"Project\": {\"project_id\": \"OWNER/oracle-ark\"}}",
+    "code_source": "{\"Project\": {\"project_id\": \"OWNER/price-oracle\"}}",
     "secrets_profile": null,
     "secrets_account_id": null
   }
@@ -247,7 +247,7 @@ near call price-oracle.testnet create_proposal '{
 
 Or upload WASM to FastFS/IPFS and use `WasmUrl`:
 ```bash
-python3 scripts/upload_wasm_fastfs.py target/wasm32-wasip2/release/oracle-ark.wasm
+python3 scripts/upload_wasm_fastfs.py target/wasm32-wasip2/release/oracle-example.wasm
 ```
 
 ### WASI returns empty prices

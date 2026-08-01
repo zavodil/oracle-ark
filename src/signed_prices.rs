@@ -26,7 +26,7 @@
 use crate::types::AggregationMethod;
 use base64::Engine;
 use borsh::BorshSerialize;
-use oracle_ark_sources::{parsers, ExchangeConfig};
+use oracle_example_sources::{parsers, ExchangeConfig};
 use serde::Serialize;
 use std::collections::BTreeMap;
 

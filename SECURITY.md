@@ -1,6 +1,6 @@
-# Oracle-Ark Security Best Practices
+# Oracle Example Security Best Practices
 
-Security considerations for operating and integrating with the Oracle-Ark price oracle.
+Security considerations for operating and integrating with the Oracle Example price oracle.
 
 ## Architecture Security
 

@@ -39,7 +39,7 @@
             "json_path": "stargazers_count",
             "method": "GET",
             "headers": [
-              ["User-Agent", "Oracle-Ark/1.0"],
+              ["User-Agent", "Oracle Example/1.0"],
               ["Accept", "application/vnd.github.v3+json"]
             ]
           }

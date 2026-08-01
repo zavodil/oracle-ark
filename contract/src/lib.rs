@@ -378,10 +378,10 @@ pub struct Contract {
     /// OutLayer secrets account ID (e.g., "zavodil2.testnet")
     pub secrets_account_id: Option<AccountId>,
 
-    /// Pyth: PriceIdentifier (64-char hex) -> Oracle-Ark asset_id
+    /// Pyth: PriceIdentifier (64-char hex) -> Oracle Example asset_id
     pub pyth_price_id_to_asset: UnorderedMap<String, String>,
 
-    /// Pyth: Oracle-Ark asset_id -> PriceIdentifier (64-char hex)
+    /// Pyth: Oracle Example asset_id -> PriceIdentifier (64-char hex)
     pub pyth_asset_to_price_id: UnorderedMap<String, String>,
 
     /// Pyth: staleness threshold in seconds (default 60)

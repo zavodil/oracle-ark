@@ -1,10 +1,11 @@
 [package]
-name = "oracle-ark"
+name = "oracle-example"
 version = "0.1.0"
 edition = "2021"
+license = "MIT OR Apache-2.0"
 
 [[bin]]
-name = "oracle-ark"
+name = "oracle-example"
 path = "src/main.rs"
 
 [dependencies]
@@ -23,7 +24,7 @@ hex = "0.4"
 base64 = "0.21"
 
 # Shared sources library
-oracle-ark-sources = { path = "sources", features = ["wasi"] }
+oracle-example-sources = { path = "sources", features = ["wasi"] }
 
 [profile.release]
 opt-level = "z"  # Optimize for size

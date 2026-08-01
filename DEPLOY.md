@@ -1,4 +1,4 @@
-# Oracle-Ark Deployment Guide
+# Oracle Example Deployment Guide
 
 ## Architecture
 
@@ -44,7 +44,7 @@ The steps below must be followed **in this exact order** because of dependencies
 ## Step 1: Build Contract
 
 ```bash
-cd wasi-examples/oracle-ark/contract
+cd oracle-example/contract
 cargo near build
 ```
 
@@ -122,7 +122,7 @@ Required before any OutLayer calls (price fetching, push signer registration).
 near call price-oracle.near create_proposal '{"action": {
   "action": "configure_outlayer",
   "outlayer_contract_id": "outlayer.near",
-  "code_source": "{\"Project\":{\"project_id\":\"owner.near/oracle-ark\"}}",
+  "code_source": "{\"Project\":{\"project_id\":\"owner.near/price-oracle\"}}",
   "secrets_profile": "default",
   "secrets_account_id": "owner.near"
 }}' --accountId member1.near --deposit 0.1
@@ -235,14 +235,14 @@ near view price-oracle.near can_subsidize_outlayer_calls
 ### 9.1 Build WASI
 
 ```bash
-cd wasi-examples/oracle-ark
+cd oracle-example
 ./build.sh
 ```
 
 ### 9.2 Create OutLayer project
 
 1. Go to https://outlayer.fastnear.com
-2. Create project: name `oracle-ark`, link your GitHub repo
+2. Create project: name `oracle-example`, link your GitHub repo
 3. Note your project UUID
 
 ### 9.3 Configure scheduler
@@ -256,7 +256,7 @@ Key settings in `.env`:
 ```bash
 COORDINATOR_URL=https://api.outlayer.fastnear.com
 PROJECT_OWNER=owner.near
-PROJECT_NAME=oracle-ark
+PROJECT_NAME=price-oracle
 PAYMENT_KEY=owner.near:1:your-secret-key
 
 UPDATE_INTERVAL_SECS=60

@@ -1,10 +1,10 @@
-# Oracle-Ark SDK
+# Oracle Example SDK
 
-Integration guide for the Oracle-Ark price oracle contract on NEAR Protocol.
+Integration guide for the Oracle Example price oracle contract on NEAR Protocol.
 
 ## Overview
 
-Oracle-Ark provides verifiable price feeds for DeFi applications. Prices are fetched from multiple sources (CoinGecko, Binance, Pyth) inside a TEE (Trusted Execution Environment) and aggregated using median.
+Oracle Example provides verifiable price feeds for DeFi applications. Prices are fetched from multiple sources (CoinGecko, Binance, Pyth) inside a TEE (Trusted Execution Environment) and aggregated using median.
 
 **Key features:**
 - **TEE-verified prices** - All price fetching happens inside Intel TDX enclave
@@ -573,7 +573,7 @@ near view price-oracle.near get_assets '{}'
 
 ## Compatibility with NEAR Native Oracle
 
-Oracle-Ark maintains full backward compatibility with [NearDeFi/price-oracle](https://github.com/NearDeFi/price-oracle):
+Oracle Example maintains full backward compatibility with [NearDeFi/price-oracle](https://github.com/NearDeFi/price-oracle):
 
 | Method | Status | Notes |
 |--------|--------|-------|
@@ -585,7 +585,7 @@ Oracle-Ark maintains full backward compatibility with [NearDeFi/price-oracle](ht
 | `get_asset` / `get_assets` | Compatible | Same interface |
 | EMA queries (`asset#period`) | Compatible | Same format |
 
-**New methods** (Oracle-Ark only):
+**New methods** (Oracle Example only):
 - `request_price_data` - Get prices directly without callback (checks cache, fetches from OutLayer if stale)
 - `request_custom_data` - Fetch custom data directly without callback
 - `custom_call` - Fetch custom data with callback

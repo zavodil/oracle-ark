@@ -12,7 +12,7 @@ mod telegram;
 use anyhow::{Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use futures::stream::{self, StreamExt};
-use oracle_ark_sources::ExchangeConfig;
+use oracle_example_sources::ExchangeConfig;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::env;
@@ -28,7 +28,7 @@ struct Config {
     /// Project owner (e.g., "alice.near")
     project_owner: String,
 
-    /// Project name (e.g., "oracle-ark")
+    /// Project name (e.g., "oracle-example")
     project_name: String,
 
     /// Project UUID for reading public storage
@@ -265,7 +265,7 @@ impl StoredPrice {
             .filter(|s| !excluded.iter().any(|e| e.eq_ignore_ascii_case(&s.name)))
             .map(|s| s.price)
             .collect();
-        oracle_ark_sources::parsers::median(&values)
+        oracle_example_sources::parsers::median(&values)
     }
 }
 
@@ -320,7 +320,7 @@ async fn main() -> Result<()> {
         .timeout(Duration::from_secs(30)) // All requests are short (async submit + poll)
         // CoinGecko rejects requests with no User-Agent (HTTP 403), and the scheduler queries the
         // same sources as the worker for its price comparison.
-        .user_agent("oracle-ark-scheduler/1.0 (+https://github.com/zavodil/oracle-ark)")
+        .user_agent("oracle-example-scheduler/1.0 (+https://github.com/out-layer/oracle-example)")
         .build()?;
 
     info!("Starting oracle scheduler");
@@ -891,7 +891,7 @@ async fn poll_and_update(
     alert_throttle: &mut telegram::AlertThrottle,
 ) -> Result<bool> {
     // Reset Chainlink disabled state each cycle (scheduler is long-lived)
-    oracle_ark_sources::CHAINLINK_DISABLED.store(false, std::sync::atomic::Ordering::Relaxed);
+    oracle_example_sources::CHAINLINK_DISABLED.store(false, std::sync::atomic::Ordering::Relaxed);
 
     let all_tokens: Vec<String> = exchange_configs.keys().cloned().collect();
     let api_key = env::var("API_KEY").ok();
@@ -1604,7 +1604,7 @@ mod tests {
         ]);
         assert_eq!(skewed.price_excluding(&slow), Some(100.5));
         // the headline the trigger used to compare against is 15% away — a permanent trigger
-        let headline = oracle_ark_sources::parsers::median(
+        let headline = oracle_example_sources::parsers::median(
             &skewed.sources.iter().map(|s| s.price).collect::<Vec<_>>(),
         )
         .unwrap();

@@ -18,7 +18,7 @@ const NETWORK_CONFIG = {
   outlayerContractId: 'outlayer.near',
   rpcUrl: 'https://rpc.mainnet.near.org',
   explorerUrl: 'https://nearblocks.io',
-  coordinatorUrl: 'https://api.outlayer.fastnear.com',
+  coordinatorUrl: 'https://api.outlayer.ai',
 };
 
 interface WalletContextType {

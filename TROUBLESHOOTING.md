@@ -11,7 +11,7 @@ Operational runbook for diagnosing and fixing common issues.
 docker ps | grep oracle-scheduler
 
 # 2. Are stored prices fresh?
-curl -s "https://api.outlayer.fastnear.com/public/storage/batch" \
+curl -s "https://api.outlayer.ai/public/storage/batch" \
   -H "Content-Type: application/json" \
   -d '{"project_uuid": "YOUR_PROJECT_UUID", "keys": ["price:wrap.near"]}' | jq .
 
@@ -316,7 +316,7 @@ near call price-oracle-wrapper.testnet predict \
 **Common causes:**
 - Wrong `PROJECT_UUID` — get correct one from OutLayer dashboard
 - CORS proxy not running — run `python3 server.py`
-- API URL wrong — should be `https://api.outlayer.fastnear.com` (not `https://testnet-api...` for mainnet)
+- API URL wrong — should be `https://api.outlayer.ai` (not `https://testnet-api...` for mainnet)
 
 ### Dashboard shows stale prices
 

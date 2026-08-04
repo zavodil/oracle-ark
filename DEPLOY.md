@@ -254,7 +254,7 @@ cp .env.example .env
 
 Key settings in `.env`:
 ```bash
-COORDINATOR_URL=https://api.outlayer.fastnear.com
+COORDINATOR_URL=https://api.outlayer.ai
 PROJECT_OWNER=owner.near
 PROJECT_NAME=price-oracle
 PAYMENT_KEY=owner.near:1:your-secret-key

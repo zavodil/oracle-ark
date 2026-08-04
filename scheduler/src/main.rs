@@ -114,7 +114,7 @@ impl Config {
     fn from_env() -> Result<Self> {
         Ok(Self {
             coordinator_url: env::var("COORDINATOR_URL")
-                .unwrap_or_else(|_| "https://api.outlayer.fastnear.com".to_string()),
+                .unwrap_or_else(|_| "https://api.outlayer.ai".to_string()),
             project_owner: env::var("PROJECT_OWNER").context("PROJECT_OWNER not set")?,
             project_name: env::var("PROJECT_NAME").context("PROJECT_NAME not set")?,
             project_uuid: env::var("PROJECT_UUID").context("PROJECT_UUID not set")?,

@@ -506,7 +506,7 @@ for `price-oracle.near/price-oracle`):
 
 ```bash
 # Read one or more keys without a blockchain call
-curl -X POST "https://api.outlayer.fastnear.com/public/storage/batch" \
+curl -X POST "https://api.outlayer.ai/public/storage/batch" \
   -H "Content-Type: application/json" \
   -d '{"project_uuid": "p0000000000000003", "keys": ["price:wrap.near"]}'
 ```

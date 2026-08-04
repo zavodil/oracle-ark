@@ -158,7 +158,7 @@ cp .env.example .env
 
 ```env
 # OutLayer coordinator
-COORDINATOR_URL=https://api.outlayer.fastnear.com
+COORDINATOR_URL=https://api.outlayer.ai
 
 # Project identification
 PROJECT_OWNER=alice.near
@@ -199,7 +199,7 @@ cargo run --release
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `COORDINATOR_URL` | `https://api.outlayer.fastnear.com` | OutLayer API URL |
+| `COORDINATOR_URL` | `https://api.outlayer.ai` | OutLayer API URL |
 | `PROJECT_OWNER` | required | NEAR account owning the project |
 | `PROJECT_NAME` | required | OutLayer project name |
 | `PROJECT_UUID` | required | Project UUID for public storage reads |

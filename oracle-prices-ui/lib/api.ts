@@ -1,6 +1,6 @@
 // API helpers for OutLayer and oracle interactions
 
-const COORDINATOR_URL = 'https://api.outlayer.fastnear.com';
+const COORDINATOR_URL = 'https://api.outlayer.ai';
 const PROJECT_UUID = 'p0000000000000003'; // price-oracle.near project
 
 export interface StoredPrice {

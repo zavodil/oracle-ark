@@ -31,7 +31,7 @@ on-chain, so that account needs no funding.
 Reading it back:
 
 ```bash
-curl -sX POST https://api.outlayer.fastnear.com/call/price-oracle.near/price-oracle \
+curl -sX POST https://api.outlayer.ai/call/price-oracle.near/price-oracle \
   -H "X-Payment-Key: $PAYMENT_KEY" -H "Content-Type: application/json" \
   -d '{"input":{"command":"get_public_key","key_name":"PROTECTED_RHEA_FEED_KEY"},
        "secrets_ref":{"profile":"oracle","account_id":"price-oracle.near"}}'

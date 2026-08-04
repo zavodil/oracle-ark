@@ -12,7 +12,7 @@ import {
   DEFAULT_TOKENS,
 } from '@/lib/tokens';
 
-const API_URL = 'https://api.outlayer.fastnear.com';
+const API_URL = 'https://api.outlayer.ai';
 const PROJECT_UUID = 'p0000000000000003';
 const RECENCY_DURATION_SEC = 120; // 2 minutes
 

@@ -24,7 +24,7 @@ export interface TokensConfig {
   [contractId: string]: TokenInfo;
 }
 
-const API_URL = 'https://api.outlayer.fastnear.com';
+const API_URL = 'https://api.outlayer.ai';
 const PROJECT_UUID = 'p0000000000000003';
 
 // Fetch token configs from public storage (config:assets)

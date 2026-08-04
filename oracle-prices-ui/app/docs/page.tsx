@@ -437,7 +437,7 @@ Result: No human holds the signing key. Only verified TEE code can push prices.`
                 material only.
               </p>
               <pre className="bg-dark-900 rounded-lg p-4 overflow-x-auto mb-4">
-                <code className="text-sm text-dark-300">{`curl -sX POST https://api.outlayer.fastnear.com/call/price-oracle.near/price-oracle \\
+                <code className="text-sm text-dark-300">{`curl -sX POST https://api.outlayer.ai/call/price-oracle.near/price-oracle \\
   -H "X-Payment-Key: $PAYMENT_KEY" -H "Content-Type: application/json" \\
   -d '{
     "input": { "command": "get_public_key", "key_name": "PROTECTED_RHEA_FEED_KEY" },
@@ -480,7 +480,7 @@ Result: No human holds the signing key. Only verified TEE code can push prices.`
                 field is ignored, so older clients keep working.
               </p>
               <pre className="bg-dark-900 rounded-lg p-4 overflow-x-auto mb-4">
-                <code className="text-sm text-dark-300">{`curl -sX POST https://api.outlayer.fastnear.com/call/price-oracle.near/price-oracle \\
+                <code className="text-sm text-dark-300">{`curl -sX POST https://api.outlayer.ai/call/price-oracle.near/price-oracle \\
   -H "X-Payment-Key: $PAYMENT_KEY" -H "Content-Type: application/json" \\
   -d '{
     "input": {

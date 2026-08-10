@@ -1,10 +1,10 @@
 # TEE-Secured Price Oracle
 
-> **[Full documentation](https://outlayer.fastnear.com/docs/examples#oracle-example)** on the OutLayer dashboard.
+> **[Full documentation](https://app.outlayer.ai/docs/examples#oracle-example)** on the OutLayer dashboard.
 
 **On-Demand Oracle with Sustainable Economics**
 
-Based on [OutLayer](https://outlayer.fastnear.com) — verifiable off-chain computation for NEAR Protocol.
+Based on [OutLayer](https://app.outlayer.ai) — verifiable off-chain computation for NEAR Protocol.
 
 [Dashboard & Playground](https://price-oracle.outlayer.ai/) | [GitHub](https://github.com/out-layer/oracle-example)
 
@@ -480,7 +480,7 @@ Example — fetch game price from Steam:
 ./build.sh
 
 # Deploy via OutLayer dashboard or CLI
-# See: https://outlayer.fastnear.com/dashboard
+# See: https://app.outlayer.ai
 ```
 
 ---
@@ -570,7 +570,7 @@ oracle-example/
 
 - **Dashboard & Playground & Docs:** https://price-oracle.outlayer.ai/
 - **GitHub:** https://github.com/out-layer/oracle-example
-- **OutLayer Platform:** https://outlayer.fastnear.com/dashboard
+- **OutLayer Platform:** https://app.outlayer.ai
 - **Integration Guide:** [integration.md](integration.md)
 - **SDK Reference:** [sdk.md](sdk.md)
 - **WASI Tutorial:** [WASI_TUTORIAL.md](https://github.com/fastnear/near-outlayer/blob/main/wasi-examples/WASI_TUTORIAL.md)

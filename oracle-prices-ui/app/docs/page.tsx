@@ -297,7 +297,7 @@ Result: No human holds the signing key. Only verified TEE code can push prices.`
               <p className="text-dark-300 mb-6">
                 Every result is attested by OutLayer&apos;s TEE: the signature proves <em>this WASM binary produced this output inside Intel TDX</em>.
                 For the full trust model — what the signature does and does not prove, and how to verify it — see the{' '}
-                <a href="https://outlayer.fastnear.com/docs/tee-attestation" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">platform attestation docs</a>.
+                <a href="https://app.outlayer.ai/docs/tee-attestation" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">platform attestation docs</a>.
                 This section covers what is specific to the oracle.
               </p>
 
@@ -415,7 +415,7 @@ Result: No human holds the signing key. Only verified TEE code can push prices.`
                   <code className="text-primary">PROTECTED_</code>. That prefix is not a convention — OutLayer
                   generates such secrets <strong className="text-white">inside the TEE</strong>, and their value is
                   never shown to anyone, including the project owner (
-                  <a href="https://outlayer.fastnear.com/docs/secrets#creating-secrets" target="_blank"
+                  <a href="https://app.outlayer.ai/docs/secrets#creating-secrets" target="_blank"
                      rel="noopener noreferrer" className="text-primary hover:underline">how PROTECTED_ secrets are created</a>).
                   A valid signature therefore means the payload came out of the attested binary, not from an operator
                   holding a key on a laptop. That key is <strong className="text-white">fixed in the worker&apos;s
@@ -460,7 +460,7 @@ Result: No human holds the signing key. Only verified TEE code can push prices.`
                   </li>
                   <li>
                     <strong className="text-white">TEE attestation.</strong> The same call has a TDX attestation —{' '}
-                    <a href="https://outlayer.fastnear.com/attestation/194943?network=mainnet"
+                    <a href="https://app.outlayer.ai/attestation/194943?network=mainnet"
                        target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">
                       example attestation
                     </a>. Press <strong className="text-white">🔍 Load &amp; Verify from Blockchain</strong> there to

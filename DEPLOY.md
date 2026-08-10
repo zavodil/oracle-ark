@@ -21,7 +21,7 @@ The only owner-only operations are `set_council` (bootstrap) and the initial dep
 - Cargo Near: `cargo install cargo-near`
 - Rust 1.85+ with `wasm32-wasip2` target
 - Docker (for scheduler)
-- OutLayer account at https://outlayer.fastnear.com
+- OutLayer account at https://app.outlayer.ai
 
 ## Initialization Order
 
@@ -241,7 +241,7 @@ cd oracle-example
 
 ### 9.2 Create OutLayer project
 
-1. Go to https://outlayer.fastnear.com
+1. Go to https://app.outlayer.ai
 2. Create project: name `oracle-example`, link your GitHub repo
 3. Note your project UUID
 

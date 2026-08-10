@@ -1,7 +1,7 @@
 # Oracle Example Contract
 
 TEE-secured price oracle that **recreates the interface** of the original [NEAR Native Price Oracle](https://github.com/NearDeFi/price-oracle) (`priceoracle.near`) with enhancements:
-- TEE-verified prices via [OutLayer](https://outlayer.fastnear.com) (Intel TDX)
+- TEE-verified prices via [OutLayer](https://app.outlayer.ai) (Intel TDX)
 - Custom data fetching from any HTTP API
 - On-demand pricing with automatic fallback
 

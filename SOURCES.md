@@ -108,7 +108,7 @@ Only **Pyth** exposes an upstream data timestamp that the oracle checks: prices 
 endpoint above is stamped with the fetch time and is only as fresh as the moment it was
 read — including `bitstamp`, `okx` and `bitget`, whose batch endpoints *do* report an
 upstream time that the parsers carry but the aggregator does not act on. See
-[the platform freshness docs](https://outlayer.fastnear.com/docs/tee-attestation#data-freshness)
+[the platform freshness docs](https://app.outlayer.ai/docs/tee-attestation#data-freshness)
 for how consumers should reason about age.
 
 ## Refresh tiers

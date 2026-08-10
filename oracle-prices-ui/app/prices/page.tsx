@@ -515,12 +515,12 @@ export default function PricesPage() {
             <div className="text-sm text-dark-400">
               Prices fetched from{' '}
               <a
-                href="https://outlayer.fastnear.com"
+                href="https://outlayer.ai"
                 target="_blank"
                 rel="noopener noreferrer"
                 className="text-primary hover:underline"
               >
-                NEAR OutLayer
+                OutLayer
               </a>{' '}
               public storage. The most-used assets are refreshed on the fastest cycle, the rest on
               a wider one, and a 1% move refreshes early regardless. Every price carries the

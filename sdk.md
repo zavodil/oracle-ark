@@ -596,4 +596,4 @@ Oracle Example maintains full backward compatibility with [NearDeFi/price-oracle
 
 - [Deployment Guide](DEPLOY.md)
 - [NEAR Native Price Oracle](https://github.com/NearDeFi/price-oracle) (original contract)
-- [OutLayer Documentation](https://outlayer.fastnear.com)
+- [OutLayer Documentation](https://app.outlayer.ai)

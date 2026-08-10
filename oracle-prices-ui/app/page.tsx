@@ -85,7 +85,7 @@ export default function HomePage() {
               On-Demand Oracle with Sustainable Economics
             </p>
             <p className="text-dark-400 mb-8 max-w-2xl mx-auto">
-              Based on <a href="https://outlayer.fastnear.com" className="text-primary hover:underline">OutLayer</a> —
+              Based on <a href="https://outlayer.ai" className="text-primary hover:underline">OutLayer</a> —
               verifiable off-chain computation for NEAR Protocol
             </p>
             <div className="flex flex-wrap justify-center gap-4">
@@ -408,7 +408,7 @@ ext_outlayer::ext("outlayer.near".parse().unwrap())
           <div className="flex flex-wrap justify-between items-center gap-4">
             <div className="text-dark-400 text-sm">
               TEE-Secured Price Oracle — Based on{' '}
-              <a href="https://outlayer.fastnear.com" className="text-primary hover:underline">
+              <a href="https://outlayer.ai" className="text-primary hover:underline">
                 OutLayer
               </a>
             </div>

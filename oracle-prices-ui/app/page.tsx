@@ -86,7 +86,7 @@ export default function HomePage() {
             </p>
             <p className="text-dark-400 mb-8 max-w-2xl mx-auto">
               Based on <a href="https://outlayer.ai" className="text-primary hover:underline">OutLayer</a> —
-              verifiable off-chain computation for NEAR Protocol
+              verifiable compute and custody for NEAR Protocol
             </p>
             <div className="flex flex-wrap justify-center gap-4">
               <Link href="/playground" className="btn btn-primary text-lg px-8 py-3">

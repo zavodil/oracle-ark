@@ -4,7 +4,7 @@
 
 **On-Demand Oracle with Sustainable Economics**
 
-Based on [OutLayer](https://app.outlayer.ai) — verifiable off-chain computation for NEAR Protocol.
+Based on [OutLayer](https://app.outlayer.ai) — verifiable compute and custody for NEAR Protocol.
 
 [Dashboard & Playground](https://price-oracle.outlayer.ai/) | [GitHub](https://github.com/out-layer/oracle-example)
 
